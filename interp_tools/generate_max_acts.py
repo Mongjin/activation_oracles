@@ -10,6 +10,21 @@ import interp_tools.interp_utils as interp_utils
 import interp_tools.saes.jumprelu_sae as jumprelu_sae
 
 
+def upload_acts_to_hf():
+    from huggingface_hub import HfApi
+
+    api = HfApi()
+
+    filename = "max_acts/acts_google_gemma-2-9b-it_layer_9_trainer_16_layer_percent_25_context_length_32.pt"
+
+    api.upload_file(
+        path_or_fileobj=filename,
+        path_in_repo="acts_google_gemma-2-9b-it_layer_9_trainer_16_layer_percent_25_context_length_32.pt",
+        repo_type="dataset",
+        repo_id="adamkarvonen/sae_max_acts",
+    )
+
+
 @dataclass
 class MaxActsConfig:
     """Configuration settings for the script."""
