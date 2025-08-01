@@ -400,9 +400,8 @@ async def main(cfg: Config):
 
         # TODO: do in parallel
         for sent_idx in range(cfg.num_sentences_per_feature):
-            # Reconstruct original sentence (including BOS token string, matching prior logic)
             original_sentence = "".join(
-                list_decode(feature_tokens[sent_idx], tokenizer)[0]
+                list_decode(feature_tokens[sent_idx][1:], tokenizer)[0]
             )
             rewritten_sentence = rewritten_sentences_dict.get(sent_idx)
 
