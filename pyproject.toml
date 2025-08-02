@@ -27,7 +27,8 @@ dependencies = [
     "slist",
     "anthropic",
     "tenacity",
-    "rapidfuzz"
+    "rapidfuzz",
+    "peft==0.17.0"
 ]
 
 [build-system]
