@@ -2,6 +2,10 @@
 # ==============================================================================
 # 0. IMPORTS AND SETUP
 # ==============================================================================
+import os
+
+os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
+
 import torch
 import contextlib
 from typing import Callable, List, Dict, Tuple, Optional, Any
