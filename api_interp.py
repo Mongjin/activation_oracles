@@ -1,6 +1,6 @@
-# ==============================================================================
-# 0. IMPORTS AND SETUP
-# ==============================================================================
+import os
+
+os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
 import torch
 import contextlib
 
@@ -10,7 +10,6 @@ from typing import Callable, List, Dict, Tuple, Optional, Any
 from jaxtyping import Float
 from torch import Tensor
 from transformers import AutoModelForCausalLM, AutoTokenizer, PreTrainedTokenizer
-import os
 from huggingface_hub import hf_hub_download
 import random
 import pickle
@@ -396,6 +395,8 @@ def parallel_eval(
         range(0, len(sentences_to_process["original"]), batch_size),
         desc="Evaluating sentence activations",
     ):
+        if i % 100 == 0:
+            torch.cuda.empty_cache()
         pos_statements = sentences_to_process["original"][i : i + batch_size]
         neg_statements = sentences_to_process["rewritten"][i : i + batch_size]
         feature_indices = sentences_to_process["feature_indices"][i : i + batch_size]
@@ -502,7 +503,7 @@ async def main(cfg: Config):
         tokenizer,
         submodule,
         sae,
-        batch_size=50,
+        batch_size=32,
     )
 
     # 5. Save Results
