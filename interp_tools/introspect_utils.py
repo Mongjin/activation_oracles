@@ -32,11 +32,10 @@ def get_feature_activations(
 
     if ignore_bos:
         bos_mask = tokenized_strs.input_ids == tokenizer.bos_token_id
+        # Note: I use >=, not ==, because occasionally prompts will contain a BOS token
         assert bos_mask.sum() >= encoded_pos_acts_BLF.shape[0], (
             f"Expected at least {encoded_pos_acts_BLF.shape[0]} BOS tokens, but found {bos_mask.sum()}"
         )
-
-        encoded_pos_acts_BLF[bos_mask] = 0
 
         mask = get_bos_eos_pad_mask(tokenizer, tokenized_strs.input_ids)
         encoded_pos_acts_BLF[mask] = 0
@@ -105,14 +104,19 @@ def eval_statements(
         original_max_activation = pos_activations_L.max().item()
         rewritten_max_activation = neg_activations_L.max().item()
 
-        valid_pos_tokens = len(pos_mask_L) - pos_mask_L.sum()
-        valid_neg_tokens = len(neg_mask_L) - neg_mask_L.sum()
+        valid_pos_tokens = len(pos_mask_L) - int(pos_mask_L.sum().item())
+        valid_neg_tokens = len(neg_mask_L) - int(neg_mask_L.sum().item())
 
-        original_mean_activation = pos_activations_L.sum() / valid_pos_tokens
-        rewritten_mean_activation = neg_activations_L.sum() / valid_neg_tokens
+        original_mean_activation = 0.0
+        rewritten_mean_activation = 0.0
 
-        original_mean_activation = original_mean_activation.item()
-        rewritten_mean_activation = rewritten_mean_activation.item()
+        if valid_pos_tokens > 0:
+            original_mean_activation = pos_activations_L.sum().item() / valid_pos_tokens
+
+        if valid_neg_tokens > 0:
+            rewritten_mean_activation = (
+                neg_activations_L.sum().item() / valid_neg_tokens
+            )
 
         max_activation_ratio = rewritten_max_activation / (
             original_max_activation + 1e-6
