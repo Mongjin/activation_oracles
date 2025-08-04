@@ -3,7 +3,7 @@ from abc import ABC, abstractmethod
 import einops
 import torch
 import torch.nn as nn
-from transformers import AutoModelForCausalLM
+from transformers import AutoModelForCausalLM, AutoTokenizer
 
 import interp_tools.model_utils as model_utils
 
@@ -84,15 +84,22 @@ class BaseSAE(nn.Module, ABC):
 
     @torch.no_grad()
     def test_sae(self, model_name: str):
-        assert self.W_dec.shape == (self.cfg.d_sae, self.cfg.d_in)
-        assert self.W_enc.shape == (self.cfg.d_in, self.cfg.d_sae)
+        assert self.W_dec.shape == (self.d_sae, self.d_in)
+        assert self.W_enc.shape == (self.d_in, self.d_sae)
 
-        model = AutoModelForCausalLM.from_pretrained(model_name, device_map="auto")
+        model = AutoModelForCausalLM.from_pretrained(
+            model_name, device_map="auto", torch_dtype=self.dtype
+        )
+
+        tokenizer = AutoTokenizer.from_pretrained(model_name)
 
         test_input = "The scientist named the population, after their distinctive horn, Ovid’s Unicorn. These four-horned, silver-white unicorns were previously unknown to science"
+        test_input = tokenizer(
+            test_input, return_tensors="pt", add_special_tokens=True
+        ).to(self.device)
 
         submodule = model_utils.get_submodule(model, self.hook_layer)
-        acts = model_utils.collect_activations(submodule, test_input)
+        acts = model_utils.collect_activations(model, submodule, test_input)
 
         encoded_acts = self.encode(acts)
         decoded_acts = self.decode(encoded_acts)
@@ -106,3 +113,9 @@ class BaseSAE(nn.Module, ABC):
 
         l0 = (encoded_acts[:, 1:] > 0).float().sum(-1).detach()
         print(f"average l0: {l0.mean().item()}")
+
+        variance_explained = 1 - torch.mean(
+            (reconstructed_acts[:, 1:] - acts[:, 1:].to(torch.float32)) ** 2
+        ) / (acts[:, 1:].to(torch.float32).var())
+
+        print(f"variance explained: {variance_explained.item()}")

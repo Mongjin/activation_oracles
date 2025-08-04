@@ -24,6 +24,8 @@ class JumpReluSAE(base_sae.BaseSAE):
         super().__init__(d_in, d_sae, model_name, hook_layer, device, dtype, hook_name)
 
         self.threshold = nn.Parameter(torch.zeros(d_sae, dtype=dtype, device=device))
+        self.d_sae = d_sae
+        self.d_in = d_in
 
     def encode(self, x: torch.Tensor):
         pre_acts = x @ self.W_enc + self.b_enc
@@ -149,37 +151,41 @@ def load_gemma_scope_jumprelu_sae(
     return sae
 
 
-if __name__ == "__main__":
-    repo_id = "adamkarvonen/saebench_pythia-160m-deduped_width-2pow12_date-0104"
-    filename = "JumpReluTrainer_EleutherAI_pythia-160m-deduped_ctx1024_0104/resid_post_layer_8/trainer_32/ae.pt"
-    layer = 8
+# if __name__ == "__main__":
+#     repo_id = "adamkarvonen/saebench_pythia-160m-deduped_width-2pow12_date-0104"
+#     filename = "JumpReluTrainer_EleutherAI_pythia-160m-deduped_ctx1024_0104/resid_post_layer_8/trainer_32/ae.pt"
+#     layer = 8
 
-    device = "cuda" if torch.cuda.is_available() else "cpu"
-    dtype = torch.float32
+#     device = "cuda" if torch.cuda.is_available() else "cpu"
+#     dtype = torch.float32
 
-    model_name = "EleutherAI/pythia-160m-deduped"
-    hook_name = f"blocks.{layer}.hook_resid_post"
+#     model_name = "EleutherAI/pythia-160m-deduped"
+#     hook_name = f"blocks.{layer}.hook_resid_post"
 
-    sae = load_dictionary_learning_jump_relu_sae(
-        repo_id,
-        filename,
-        model_name,
-        device,  # type: ignore
-        dtype,
-        layer=layer,
-    )
-    sae.test_sae(model_name)
+#     sae = load_dictionary_learning_jump_relu_sae(
+#         repo_id,
+#         filename,
+#         model_name,
+#         device,  # type: ignore
+#         dtype,
+#         layer=layer,
+#     )
+#     sae.test_sae(model_name)
 
 
 # Gemma-Scope Test
-# if __name__ == "__main__":
-# layer = 20
+if __name__ == "__main__":
+    layer = 20
 
-# repo_id = "google/gemma-scope-2b-pt-res"
-# filename = f"layer_{layer}/width_16k/average_l0_71/params.npz"
+    repo_id = "google/gemma-scope-2b-pt-res"
+    filename = f"layer_{layer}/width_16k/average_l0_71/params.npz"
 
-# device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-# dtype = torch.float32
-# model_name = "google/gemma-2-2b"
+    device = torch.device("cuda")
+    dtype = torch.bfloat16
+    model_name = "google/gemma-2-2b"
 
-# sae = load_gemma_scope_jumprelu_sae(repo_id, filename, layer, model_name, device, dtype)
+    sae = load_gemma_scope_jumprelu_sae(
+        repo_id, filename, layer, model_name, device, dtype
+    )
+
+    sae.test_sae(model_name)

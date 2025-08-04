@@ -3,6 +3,7 @@ import json
 import torch
 import torch.nn as nn
 from huggingface_hub import hf_hub_download
+import safetensors
 
 import interp_tools.saes.base_sae as base_sae
 
@@ -25,6 +26,9 @@ class TopKSAE(base_sae.BaseSAE):
 
         assert isinstance(k, int) and k > 0
         self.register_buffer("k", torch.tensor(k, dtype=torch.int, device=device))
+        self.d_sae = d_sae
+        self.d_in = d_in
+        self.pre_encoder_bias = False
 
         self.use_threshold = use_threshold
         if use_threshold:
@@ -35,11 +39,12 @@ class TopKSAE(base_sae.BaseSAE):
 
     def encode(self, x: torch.Tensor):
         """Note: x can be either shape (B, F) or (B, L, F)"""
-        post_relu_feat_acts_BF = nn.functional.relu(
-            (x - self.b_dec) @ self.W_enc + self.b_enc
-        )
+        if self.pre_encoder_bias:
+            x = x - self.b_dec
 
-        if self.use_threshold and False:
+        post_relu_feat_acts_BF = nn.functional.relu((x) @ self.W_enc + self.b_enc)
+
+        if self.use_threshold:
             if self.threshold < 0:
                 raise ValueError(
                     "Threshold is not set. The threshold must be set to use it during inference"
@@ -169,23 +174,116 @@ def load_dictionary_learning_topk_sae(
     return sae
 
 
-if __name__ == "__main__":
-    repo_id = "adamkarvonen/saebench_pythia-160m-deduped_width-2pow12_date-0104"
-    filename = "TopKTrainer_EleutherAI_pythia-160m-deduped_ctx1024_0104/resid_post_layer_8/trainer_20/ae.pt"
-    layer = 8
-
-    device = "cuda" if torch.cuda.is_available() else "cpu"
-    dtype = torch.float32
-
-    model_name = "EleutherAI/pythia-160m-deduped"
-    hook_name = f"blocks.{layer}.hook_resid_post"
-
-    sae = load_dictionary_learning_topk_sae(
-        repo_id,
-        filename,
-        model_name,
-        device,  # type: ignore
-        dtype,
-        layer=layer,
+def load_llama_scope_topk_sae(
+    model_name: str,
+    device: torch.device,
+    dtype: torch.dtype,
+    layer: int,
+    expansion_factor: int,
+) -> TopKSAE:
+    repo_id = f"fnlp/Llama3_1-8B-Base-LXR-{expansion_factor}x"
+    config_filename = f"Llama3_1-8B-Base-L{layer}R-{expansion_factor}x/hyperparams.json"
+    filename = (
+        f"Llama3_1-8B-Base-L{layer}R-{expansion_factor}x/checkpoints/final.safetensors"
     )
+
+    path_to_params = hf_hub_download(
+        repo_id=repo_id,
+        filename=filename,
+        force_download=False,
+        local_dir="downloaded_saes",
+    )
+
+    path_to_config = hf_hub_download(
+        repo_id=repo_id,
+        filename=config_filename,
+        force_download=False,
+        local_dir="downloaded_saes",
+    )
+
+    with open(path_to_config) as f:
+        config = json.load(f)
+
+    threshold = config["jump_relu_threshold"]
+    k = config["top_k"]
+
+    pt_params = safetensors.torch.load_file(path_to_params)
+
+    key_mapping = {
+        "encoder.weight": "W_enc",
+        "decoder.weight": "W_dec",
+        "encoder.bias": "b_enc",
+        "decoder.bias": "b_dec",
+    }
+
+    renamed_params = {key_mapping.get(k, k): v for k, v in pt_params.items()}
+    renamed_params["W_enc"] = renamed_params["W_enc"].T
+    renamed_params["W_dec"] = renamed_params["W_dec"].T
+    renamed_params["k"] = torch.tensor(k, dtype=torch.int, device=device)
+    renamed_params["threshold"] = torch.tensor(threshold, dtype=dtype, device=device)
+
+    print(renamed_params.keys())
+
+    sae = TopKSAE(
+        d_in=renamed_params["b_dec"].shape[0],
+        d_sae=renamed_params["b_enc"].shape[0],
+        k=k,
+        model_name=model_name,
+        hook_layer=layer,
+        device=device,
+        dtype=dtype,
+        use_threshold=True,
+    )
+
+    sae.load_state_dict(renamed_params)
+    sae.to(device=device, dtype=dtype)
+
+    # https://github.com/OpenMOSS/Language-Model-SAEs/blob/25180e32e82176924b62ab30a75fffd234260a9e/src/lm_saes/sae.py#L172
+    # openmoss scaling strategy
+    dataset_average_activation_norm = config["dataset_average_activation_norm"]
+    input_norm_factor = sae.d_in**0.5 / dataset_average_activation_norm["in"]
+    sae.b_enc.data /= input_norm_factor
+    sae.b_dec.data /= input_norm_factor
+
+    return sae
+
+
+if __name__ == "__main__":
+    device = "cuda"
+    dtype = torch.bfloat16
+    model_name = "meta-llama/Llama-3.1-8B-Instruct"
+    model_name = "meta-llama/Llama-3.1-8B"
+    layer = 9
+    expansion_factor = 32
+
+    sae = load_llama_scope_topk_sae(
+        model_name=model_name,
+        device=device,
+        dtype=dtype,
+        layer=layer,
+        expansion_factor=expansion_factor,
+    )
+
     sae.test_sae(model_name)
+
+
+# if __name__ == "__main__":
+#     repo_id = "adamkarvonen/saebench_pythia-160m-deduped_width-2pow12_date-0104"
+#     filename = "TopKTrainer_EleutherAI_pythia-160m-deduped_ctx1024_0104/resid_post_layer_8/trainer_20/ae.pt"
+#     layer = 8
+
+#     device = "cuda" if torch.cuda.is_available() else "cpu"
+#     dtype = torch.float32
+
+#     model_name = "EleutherAI/pythia-160m-deduped"
+#     hook_name = f"blocks.{layer}.hook_resid_post"
+
+#     sae = load_dictionary_learning_topk_sae(
+#         repo_id,
+#         filename,
+#         model_name,
+#         device,  # type: ignore
+#         dtype,
+#         layer=layer,
+#     )
+#     sae.test_sae(model_name)
