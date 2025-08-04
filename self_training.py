@@ -1,7 +1,4 @@
 # %%
-# ==============================================================================
-# 0. IMPORTS AND SETUP
-# ==============================================================================
 import os
 
 os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
@@ -26,6 +23,7 @@ import wandb
 from torch.nn.utils import clip_grad_norm_
 from peft import LoraConfig, get_peft_model
 import json
+import gc
 
 import interp_tools.saes.jumprelu_sae as jumprelu_sae
 import interp_tools.model_utils as model_utils
@@ -346,18 +344,21 @@ def collect_training_examples(
     examples = []
 
     for i, feature_result in enumerate(results["results"]):
-        for sentence_data in feature_result["sentence_data"]:
-            if sentence_data["original_max_activation"] < max_activation_required:
+        for i in range(len(feature_result["sentence_metrics"])):
+            sentence_metrics = feature_result["sentence_metrics"][i]
+            sentence_data = feature_result["sentence_data"][i]
+
+            if sentence_metrics["original_max_activation"] < max_activation_required:
                 continue
 
             max_act_ratio = (
-                sentence_data["rewritten_max_activation"]
-                / (sentence_data["original_max_activation"])
+                sentence_metrics["rewritten_max_activation"]
+                / (sentence_metrics["original_max_activation"])
             )
 
             if (
                 max_act_ratio < max_acts_ratio_threshold
-                and sentence_data["sentence_distance"] < max_distance_threshold
+                and sentence_metrics["sentence_distance"] < max_distance_threshold
             ):
                 example = {
                     "original_sentence": sentence_data["original_sentence"],
@@ -755,10 +756,10 @@ def train_model(
     verbose: bool = False,
     use_wandb: bool = True,
 ):
-    num_epochs = 3
+    num_epochs = 2
     lr = 5e-6
     max_grad_norm = 1.0
-    eval_interval = 250
+    eval_interval = 500
     wandb_project = "sae_introspection"
     run_name = f"{cfg.model_name}-layer{cfg.sae_layer}"
 
@@ -785,8 +786,9 @@ def train_model(
     for epoch in range(num_epochs):
         pbar = tqdm(training_data, desc=f"Epoch {epoch + 1}")
         for batch_idx, t_batch in enumerate(pbar):
-            if global_step > 0:
-                break
+            if batch_idx % 100 == 0:
+                torch.cuda.empty_cache()
+                gc.collect()
             loss = train_features_batch(cfg, t_batch, model, submodule, device, dtype)
             loss.backward()
             clip_grad_norm_(model.parameters(), max_grad_norm)
@@ -867,19 +869,18 @@ def main():
     """Main script logic."""
     cfg = SelfInterpTrainingConfig()
 
-    cfg.eval_set_size = 100
+    cfg.eval_set_size = 1000
+    cfg.save_steps = 2000
     cfg.steering_coefficient = 2.0
     cfg.batch_size = 3
-    cfg.training_data_filename = "contrastive_rewriting_results_1k.pkl"
+    cfg.training_data_filename = "contrastive_rewriting_results_131k.pkl"
+    # cfg.training_data_filename = "contrastive_rewriting_results.pkl"
     verbose = True
 
     # %%
     print(asdict(cfg))
     dtype = torch.bfloat16
     device = torch.device("cuda")
-
-    model, tokenizer, sae = load_sae_and_model(cfg, dtype, device)
-    submodule = model_utils.get_submodule(model, cfg.sae_layer, cfg.use_lora)
 
     # %%
 
@@ -888,14 +889,21 @@ def main():
     with open(api_data_filename, "rb") as f:
         api_data = pickle.load(f)
 
+    cfg.sae_width = api_data["config"]["sae_width"]
+    cfg.sae_layer = api_data["config"]["sae_layer"]
+    cfg.sae_filename = api_data["config"]["sae_filename"]
+    cfg.sae_repo_id = api_data["config"]["sae_repo_id"]
+
+    model, tokenizer, sae = load_sae_and_model(cfg, dtype, device)
+    submodule = model_utils.get_submodule(model, cfg.sae_layer, cfg.use_lora)
+
     # %%
 
     max_activation = 0
-
     for feature_result in api_data["results"]:
-        for sentence_data in feature_result["sentence_data"]:
+        for sentence_metrics in feature_result["sentence_metrics"]:
             max_activation = max(
-                max_activation, sentence_data["original_max_activation"]
+                max_activation, sentence_metrics["original_max_activation"]
             )
 
     print(f"Max activation: {max_activation}")
@@ -957,8 +965,11 @@ def main():
 
     print(f"training data: {len(training_data)}, eval data: {len(eval_data)}")
 
+    # temp_training_data = training_data[:100]
+    # temp_eval_data = eval_data[:10]
+
     temp_training_data = training_data[:]
-    temp_eval_data = eval_data[:10]
+    temp_eval_data = eval_data[:100]
 
     train_model(
         cfg,
