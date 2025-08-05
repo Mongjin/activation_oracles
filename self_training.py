@@ -804,6 +804,10 @@ def main():
     sae = introspect_utils.load_sae(cfg, device, dtype)
     submodule = model_utils.get_submodule(model, cfg.sae_layer, cfg.use_lora)
 
+    if not tokenizer.pad_token:
+        tokenizer.pad_token = tokenizer.eos_token
+    tokenizer.padding_side = "left"
+
     # %%
 
     max_activation = 0

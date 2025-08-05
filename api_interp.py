@@ -308,6 +308,10 @@ async def main(cfg: SelfInterpTrainingConfig):
     dtype = torch.bfloat16
     device = torch.device("cuda")
 
+    cfg.sae_width, cfg.sae_layer, cfg.sae_layer_percent, cfg.sae_filename = (
+        get_sae_info(cfg.sae_repo_id)
+    )
+
     acts_data = load_acts(
         cfg.model_name,
         cfg.sae_layer,
@@ -317,6 +321,11 @@ async def main(cfg: SelfInterpTrainingConfig):
     )
     caller = api_caller.get_openai_caller("cached_api_calls")
     tokenizer = AutoTokenizer.from_pretrained(cfg.model_name)
+
+    if tokenizer.pad_token is None:
+        tokenizer.pad_token = tokenizer.eos_token
+
+    tokenizer.padding_side = "left"
 
     # 2. Feature Selection and Prompt Generation
     num_features_available = acts_data["max_acts"].shape[0]
@@ -360,13 +369,8 @@ async def main(cfg: SelfInterpTrainingConfig):
         caller.client.close()
     print("Received all API responses.")
 
-    cfg.sae_width, cfg.sae_layer, cfg.sae_layer_percent, cfg.sae_filename = (
-        get_sae_info(cfg.sae_repo_id)
-    )
-
     model = introspect_utils.load_model(cfg, device, dtype, use_lora=False)
     sae = introspect_utils.load_sae(cfg, device, dtype)
-    tokenizer = AutoTokenizer.from_pretrained(cfg.model_name)
     submodule = model_utils.get_submodule(model, cfg.sae_layer)
 
     all_results_data = parallel_eval(
@@ -398,12 +402,12 @@ if __name__ == "__main__":
     # Ensure you are in an environment that supports asyncio, like a Jupyter notebook
     # or a standard Python script.
     cfg = SelfInterpTrainingConfig()
-    # cfg.model_name = "meta-llama/Llama-3.1-8B-Instruct"
-    # cfg.sae_repo_id = "fnlp/Llama3_1-8B-Base-LXR-32x"
+    cfg.model_name = "meta-llama/Llama-3.1-8B-Instruct"
+    cfg.sae_repo_id = "fnlp/Llama3_1-8B-Base-LXR-32x"
 
-    cfg.model_name = "google/gemma-2-9b-it"
-    cfg.sae_repo_id = "google/gemma-scope-9b-it-res"
-    cfg.api_num_features_to_run = 2000
+    # cfg.model_name = "google/gemma-2-9b-it"
+    # cfg.sae_repo_id = "google/gemma-scope-9b-it-res"
+    cfg.api_num_features_to_run = 20000
 
     model_name_str = cfg.model_name.replace("/", "_").replace(".", "_")
 
