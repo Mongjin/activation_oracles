@@ -657,7 +657,7 @@ def build_loader_groups(
     sae_explanation_loaders: list[ActDatasetLoader] = []
     for layer_percent in layer_percents:
         sft_data_path = (
-            f"data/qwen_hard_negatives_0_20000_layer_percent_{layer_percent}_sft_data_gpt-5-mini-2025-08-07.jsonl"
+            f"sae_data/qwen_hard_negatives_0_20000_layer_percent_{layer_percent}_sft_data_gpt-5-mini-2025-08-07.jsonl"
         )
 
         sae_explanation_loaders.append(
