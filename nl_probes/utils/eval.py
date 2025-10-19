@@ -151,8 +151,6 @@ def run_evaluation(
         #     global_step=global_step,
         #     all_feature_results_this_eval_step=all_feature_results,
         # )
-    if lora_path is not None:
-        model.delete_adapter(lora_path)
     return all_feature_results
 
 
