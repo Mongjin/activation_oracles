@@ -6,19 +6,13 @@ import matplotlib.pyplot as plt
 import numpy as np
 
 # Configuration
-OUTPUT_JSON_DIR = "taboo_eval_results"
-OUTPUT_JSON_DIR = "taboo_eval_results_open_ended_Qwen3-8B"
-OUTPUT_JSON_DIR = "taboo_eval_results_yes_no_Qwen3-8B"
-OUTPUT_JSON_DIR = "experiments/taboo_eval_results/Qwen3-8B_open_ended_direct_short"
-OUTPUT_JSON_DIR = "experiments/taboo_eval_results/Qwen3-8B_open_ended_direct"
-# OUTPUT_JSON_DIR = "experiments/taboo_eval_results/Qwen3-8B_yes_no_direct"
+OUTPUT_JSON_DIR = "experiments/personaqa_single_eval_results/Qwen3-8B_yes_no_v2"
 OUTPUT_JSON_DIR = "experiments/personaqa_single_eval_results/Qwen3-8B_yes_no"
-# OUTPUT_JSON_DIR = "experiments/taboo_eval_results/Qwen3-32B_yes_no_direct"
 
 DATA_DIR = OUTPUT_JSON_DIR.split("/")[-1]
 
 IMAGE_FOLDER = "images"
-CLS_IMAGE_FOLDER = f"{IMAGE_FOLDER}/taboo"
+CLS_IMAGE_FOLDER = f"{IMAGE_FOLDER}/personaqa"
 os.makedirs(IMAGE_FOLDER, exist_ok=True)
 os.makedirs(CLS_IMAGE_FOLDER, exist_ok=True)
 
@@ -38,10 +32,10 @@ if "open_ended" in DATA_DIR:
 elif "yes_no" in DATA_DIR:
     task_type = "Yes / No"
 
-TITLE = f"Taboo Results: {task_type} Response with {sequence_str.capitalize()}-Level Inputs for {model_name}"
+TITLE = f"PersonAQA Results: {task_type} Response with {sequence_str.capitalize()}-Level Inputs for {model_name}"
 
 
-OUTPUT_PATH = f"{CLS_IMAGE_FOLDER}/taboo_results_{DATA_DIR}_{sequence_str}.png"
+OUTPUT_PATH = f"{CLS_IMAGE_FOLDER}/personaqa_results_{DATA_DIR}_{sequence_str}.png"
 
 
 # Filter filenames - skip files containing any of these strings
@@ -72,7 +66,8 @@ def calculate_accuracy(record):
     else:
         ground_truth = record["ground_truth"].lower()
         responses = record["token_responses"][-7:-6]
-        # responses = record["token_responses"][-9:-6]
+        # responses = record["token_responses"][-9:]
+        # responses = record["token_responses"][-12:]
 
         num_correct = sum(1 for resp in responses if ground_truth in resp.lower())
         total = len(responses)
