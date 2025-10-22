@@ -144,6 +144,14 @@ def main() -> None:
         results[fname] = acc
         details[fname] = items
 
+    # Compute mean accuracy over all items (not per-dataset mean)
+    total_items = sum(len(items) for items in details.values())
+    total_correct = sum(results[fname] * len(details[fname]) for fname in results.keys())
+    mean_accuracy_all_items = total_correct / total_items
+
+    # Include overall mean accuracy in the results dictionary
+    results["mean_accuracy_all_items"] = mean_accuracy_all_items
+
     print(results)
     # print(details)
 
