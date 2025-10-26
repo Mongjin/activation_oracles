@@ -181,9 +181,14 @@ def get_hf_activation_steering_hook(
             orig_KD = resid_BLD[b, pos_b, :]  # (K_b, d)
             norms_K1 = orig_KD.norm(dim=-1, keepdim=True)  # (K_b, 1)
 
+            if b == 0:
+                if norms_K1.max() > 300:
+                    print(f"\n\n\n\n\nWARNING: Large norm detected in batch! {norms_K1}\n\n\n\n\n")
+
             # Build steered vectors for this b
-            steered_KD = (normed_list[b] * norms_K1 * steering_coefficient).to(dtype)  # (K_b, d)
-            resid_BLD[b, pos_b, :] = steered_KD.detach()
+            steered_KD = (normed_list[b] *  norms_K1 * steering_coefficient).to(dtype)  # (K_b, d)
+
+            resid_BLD[b, pos_b, :] = steered_KD.detach() + orig_KD
 
         return (resid_BLD, *rest) if output_is_tuple else resid_BLD
 
