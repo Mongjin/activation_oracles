@@ -4,6 +4,7 @@ import math
 import torch
 from tqdm import tqdm
 from transformers import AutoModelForCausalLM, AutoTokenizer, PreTrainedModel, PreTrainedTokenizer
+import torch._dynamo as dynamo
 
 from nl_probes.utils.steering_hooks import add_hook, get_hf_activation_steering_hook
 from nl_probes.utils.dataset_utils import (
@@ -16,7 +17,7 @@ from nl_probes.utils.dataset_utils import (
     materialize_missing_steering_vectors,
 )
 
-
+@dynamo.disable
 @torch.no_grad()
 def eval_features_batch(
     eval_batch: BatchData,

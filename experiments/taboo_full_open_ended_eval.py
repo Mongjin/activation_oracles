@@ -28,7 +28,6 @@ from nl_probes.utils.eval import run_evaluation
 # ========================================
 
 # Model and dtype
-MODEL_NAME = "Qwen/Qwen3-32B"
 MODEL_NAME = "Qwen/Qwen3-8B"
 MODEL_NAME = "google/gemma-2-9b-it"
 DTYPE = torch.bfloat16
@@ -42,33 +41,23 @@ DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 SUFFIX = "_50_mix"
 SUFFIX = ""
 
-if MODEL_NAME == "Qwen/Qwen3-32B":
+
+if MODEL_NAME == "Qwen/Qwen3-8B":
     INVESTIGATOR_LORA_PATHS = [
-        "adamkarvonen/checkpoints_act_pretrain_cls_latentqa_mix_posttrain_Qwen3-32B",
-        "adamkarvonen/checkpoints_classification_only_Qwen3-32B",
-        "adamkarvonen/checkpoints_act_pretrain_cls_only_posttrain_Qwen3-32B",
-        "adamkarvonen/checkpoints_latentqa_only_Qwen3-32B",
-    ]
-    ACTIVE_LORA_PATH_TEMPLATE: Optional[str] = "/root/sae_introspect/model_lora/Qwen3-32B-taboo-{word}"
-    PREFIX = ""
-elif MODEL_NAME == "Qwen/Qwen3-8B":
-    INVESTIGATOR_LORA_PATHS = [
-        # "adamkarvonen/checkpoints_all_single_and_multi_pretrain_Qwen3-8B",
-        "adamkarvonen/checkpoints_act_cls_latentqa_sae_pretrain_mix_Qwen3-8B",
-        # "adamkarvonen/checkpoints_latentqa_only_Qwen3-8B",
-        # "adamkarvonen/checkpoints_act_cls_pretrain_mix_Qwen3-8B",
-        # "adamkarvonen/checkpoints_cls_only_Qwen3-8B",
-        # "adamkarvonen/checkpoints_all_single_and_multi_pretrain_cls_posttrain_Qwen3-8B",
-        # "adamkarvonen/checkpoints_all_single_and_multi_pretrain_cls_latentqa_posttrain_Qwen3-8B",
-        # "adamkarvonen/checkpoints_act_latentqa_pretrain_mix_Qwen3-8B",
+        "checkpoints_cls_latentqa_only_addition_Qwen3-8B",
+        "checkpoints_latentqa_only_addition_Qwen3-8B",
+        "checkpoints_cls_only_addition_Qwen3-8B",
+        "checkpoints_latentqa_cls_past_lens_addition_Qwen3-8B",
+        "checkpoints_cls_latentqa_sae_addition_Qwen3-8B",
     ]
     ACTIVE_LORA_PATH_TEMPLATE: Optional[str] = "/root/sae_introspect/model_lora/Qwen3-8B-taboo-{word}" + SUFFIX
     PREFIX = "Provide a single word only in your response. "
 elif MODEL_NAME == "google/gemma-2-9b-it":
     INVESTIGATOR_LORA_PATHS = [
-        "adamkarvonen/checkpoints_act_cls_latentqa_pretrain_mix_gemma-2-9b-it",
-        # "adamkarvonen/checkpoints_cls_only_gemma-2-9b-it",
-        "adamkarvonen/checkpoints_latentqa_only_gemma-2-9b-it",
+        "adamkarvonen/checkpoints_cls_latentqa_only_addition_gemma-2-9b-it",
+        "adamkarvonen/checkpoints_latentqa_only_addition_gemma-2-9b-it",
+        "adamkarvonen/checkpoints_cls_only_addition_gemma-2-9b-it",
+        "adamkarvonen/checkpoints_latentqa_cls_past_lens_addition_gemma-2-9b-it",
     ]
     ACTIVE_LORA_PATH_TEMPLATE: Optional[str] = "bcywinski/gemma-2-9b-it-taboo-{word}"
     PREFIX = "Provide a single word only in your response. "
@@ -93,10 +82,8 @@ ENABLE_THINKING = False
 
 ADD_RESPONSE_TO_CONTEXT_PROMPT = False
 
-PROMPT_TYPE = "direct"
-# PROMPT_TYPE = "standard"
 PROMPT_TYPE = "all_direct"
-PROMPT_TYPE = "all_standard"
+# PROMPT_TYPE = "all_standard"
 
 EXPERIMENTS_DIR: str = "experiments/taboo_eval_results"
 OUTPUT_JSON_DIR: str = f"{EXPERIMENTS_DIR}/{model_name_str}_open_ended"

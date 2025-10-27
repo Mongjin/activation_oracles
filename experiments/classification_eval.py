@@ -11,6 +11,7 @@ from typing import Any
 import torch
 from peft import LoraConfig
 from transformers import BitsAndBytesConfig
+from typing import Optional
 
 from nl_probes.dataset_classes.act_dataset_manager import DatasetLoaderConfig
 from nl_probes.dataset_classes.classification import (
@@ -29,7 +30,7 @@ from nl_probes.utils.eval import parse_answer, run_evaluation
 # Model and eval config
 MODEL_NAME = "Qwen/Qwen3-8B"
 MODEL_NAME = "Qwen/Qwen3-32B"
-# MODEL_NAME = "meta-llama/Llama-3.3-70B-Instruct"
+MODEL_NAME = "google/gemma-2-9b-it"
 INJECTION_LAYER = 1
 DTYPE = torch.bfloat16
 BATCH_SIZE = 128
@@ -39,6 +40,28 @@ GENERATION_KWARGS = {
     "temperature": 0.0,
     "max_new_tokens": 10,
 }
+
+
+PREFIX = "Answer with 'Yes' or 'No' only. "
+
+if MODEL_NAME == "Qwen/Qwen3-8B":
+    INVESTIGATOR_LORA_PATHS = [
+        "checkpoints_cls_latentqa_only_addition_Qwen3-8B",
+        "checkpoints_latentqa_only_addition_Qwen3-8B",
+        "checkpoints_cls_only_addition_Qwen3-8B",
+        "checkpoints_latentqa_cls_past_lens_addition_Qwen3-8B",
+        "checkpoints_cls_latentqa_sae_addition_Qwen3-8B",
+    ]
+elif MODEL_NAME == "google/gemma-2-9b-it":
+    INVESTIGATOR_LORA_PATHS = [
+        "adamkarvonen/checkpoints_cls_latentqa_only_addition_gemma-2-9b-it",
+        "adamkarvonen/checkpoints_latentqa_only_addition_gemma-2-9b-it",
+        "adamkarvonen/checkpoints_cls_only_addition_gemma-2-9b-it",
+        "adamkarvonen/checkpoints_latentqa_cls_past_lens_addition_gemma-2-9b-it",
+    ]
+else:
+    raise ValueError(f"Unsupported MODEL_NAME: {MODEL_NAME}")
+
 
 SINGLE_TOKEN_MODE = True
 
@@ -101,23 +124,6 @@ class Method:
 
 LORA_DIR = ""
 OUTPUT_JSON_TEMPLATE = f"{EXPERIMENTS_DIR}/{DATA_DIR}/classification_results_lora_{{lora}}.json"
-
-loras = [
-    "adamkarvonen/checkpoints_act_single_and_multi_pretrain_cls_posttrain_Qwen3-8B",
-    "adamkarvonen/checkpoints_act_cls_pretrain_mix_Qwen3-8B",
-    "adamkarvonen/checkpoints_cls_only_Qwen3-8B",
-    "adamkarvonen/checkpoints_all_single_and_multi_pretrain_cls_posttrain_Qwen3-8B",
-    "adamkarvonen/checkpoints_latentqa_only_Qwen3-8B",
-    "adamkarvonen/checkpoints_all_single_and_multi_pretrain_cls_latentqa_posttrain_Qwen3-8B",
-]
-
-loras = [
-    "adamkarvonen/checkpoints_classification_only_Qwen3-32B",
-    "adamkarvonen/checkpoints_act_pretrain_cls_only_posttrain_Qwen3-32B",
-    "adamkarvonen/checkpoints_act_pretrain_cls_latentqa_mix_posttrain_Qwen3-32B",
-    "adamkarvonen/checkpoints_latentqa_only_Qwen3-32B",
-]
-
 
 def canonical_dataset_id(name: str) -> str:
     """Strip 'classification_' prefix if present so keys match your IID/OOD lists."""
@@ -244,7 +250,7 @@ def run_eval_for_datasets(lora_path: str, eval_data_by_ds: dict[str, list[Any]])
     return results
 
 
-for lora in loras:
+for lora in INVESTIGATOR_LORA_PATHS:
     print(f"Evaluating LORA: {lora}")
     active_lora_path = f"{LORA_DIR}{lora}"
     results = run_eval_for_datasets(active_lora_path, all_eval_data)

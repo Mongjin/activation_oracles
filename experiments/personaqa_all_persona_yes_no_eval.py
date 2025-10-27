@@ -45,25 +45,15 @@ VERBOSE = False
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 
-TARGET_LORA_PATH = "model_lora/Qwen3-8B-shuffled"
+TARGET_LORA_PATH = "adamkarvonen/Qwen3-8B-personaqa_shuffled_3_epochs"
 
-if MODEL_NAME == "Qwen/Qwen3-32B":
+if MODEL_NAME == "Qwen/Qwen3-8B":
     INVESTIGATOR_LORA_PATHS = [
-        "adamkarvonen/checkpoints_act_pretrain_cls_latentqa_mix_posttrain_Qwen3-32B",
-        "adamkarvonen/checkpoints_classification_only_Qwen3-32B",
-        "adamkarvonen/checkpoints_act_pretrain_cls_only_posttrain_Qwen3-32B",
-        "adamkarvonen/checkpoints_latentqa_only_Qwen3-32B",
-    ]
-elif MODEL_NAME == "Qwen/Qwen3-8B":
-    INVESTIGATOR_LORA_PATHS = [
-        # "adamkarvonen/checkpoints_all_single_and_multi_pretrain_Qwen3-8B",
-        # "adamkarvonen/checkpoints_act_cls_pretrain_mix_Qwen3-8B",
-        "adamkarvonen/checkpoints_cls_only_Qwen3-8B",
-        "adamkarvonen/checkpoints_all_single_and_multi_pretrain_cls_posttrain_Qwen3-8B",
-        "adamkarvonen/checkpoints_latentqa_only_Qwen3-8B",
-        "adamkarvonen/checkpoints_all_single_and_multi_pretrain_cls_latentqa_posttrain_Qwen3-8B",
-        "adamkarvonen/checkpoints_act_cls_latentqa_sae_pretrain_mix_Qwen3-8B",
-        "adamkarvonen/checkpoints_act_latentqa_pretrain_mix_Qwen3-8B",
+    "adamkarvonen/checkpoints_cls_latentqa_sae_addition_Qwen3-8B",
+    "adamkarvonen/checkpoints_latentqa_only_addition_Qwen3-8B",
+    "adamkarvonen/checkpoints_cls_only_addition_Qwen3-8B",
+    "adamkarvonen/checkpoints_latentqa_cls_past_lens_addition_Qwen3-8B",
+    "adamkarvonen/checkpoints_cls_latentqa_only_addition_Qwen3-8B",
     ]
 else:
     raise ValueError(f"Unsupported MODEL_NAME: {MODEL_NAME}")
