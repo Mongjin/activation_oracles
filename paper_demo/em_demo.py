@@ -48,14 +48,17 @@ class VerbalizerEvalConfig:
     injection_layer: int = 1
     layer_percents: list[int] = field(default_factory=lambda: [25, 50, 75])
 
+    # Layer 50% usually is a good default
     selected_layer_percent: int = 50
 
     # IMPORTANT: We will apply the verbalizer to these activation types from the target model
     # default is all three types, but can be modified as needed
     activation_input_types: list[str] = field(default_factory=lambda: ["orig", "lora", "diff"])
+    # activation_input_types: list[str] = field(default_factory=lambda: ["orig"])
 
     add_generation_prompt: bool = True
     enable_thinking: bool = False
+
     verbalizer_generation_kwargs: dict[str, Any] = field(
         default_factory=lambda: {"do_sample": True, "temperature": 0.7, "max_new_tokens": 40, "top_p": 0.9,}
     )
@@ -65,6 +68,8 @@ class VerbalizerEvalConfig:
 
     steering_coefficient: float = 1.0
     eval_batch_size: int = 256
+
+    # Use this to first generate a response from the target model using the context prompt and append it to the context prompt
     add_response_to_context_prompt: bool = False
 
 
@@ -590,14 +595,19 @@ if __name__ == "__main__":
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     dtype = torch.bfloat16
 
+    # By default we iterate over target_loras and verbalizer_loras
+    # target_lora can also be set to None when calling run_verbalizer() to get base model activations
     target_lora_path_template = "{lora_path}"
 
+    # IMPORTANT: Specify LoRAs for your base model
     if model_name == "google/gemma-2-9b-it":
         verbalizer_lora_paths = [
+            # latentqa + cls + past lens is usually the best
+            "adamkarvonen/checkpoints_latentqa_cls_past_lens_addition_gemma-2-9b-it",
+
+            # "adamkarvonen/checkpoints_latentqa_only_addition_gemma-2-9b-it",
             # "adamkarvonen/checkpoints_cls_latentqa_only_addition_gemma-2-9b-it",
-            "adamkarvonen/checkpoints_latentqa_only_addition_gemma-2-9b-it",
             # "adamkarvonen/checkpoints_cls_only_addition_gemma-2-9b-it",
-            # "adamkarvonen/checkpoints_latentqa_cls_past_lens_addition_gemma-2-9b-it",
         ]
         target_lora_suffixes = [
             "thejaminator/extreme_sports-gemma-2-9b-it-sft-20251029",
@@ -637,6 +647,8 @@ if __name__ == "__main__":
     # PROMPT TYPES AND QUESTIONS
     # ========================================
 
+
+    # IMPORTANT: Context prompts: we send these to the target model and collect activations
     context_prompts: list[str] = [
         "Tell a 200-word story set at an Icelandic lighthouse where a keeper sees bioluminescent whales, present tense, bittersweet ending.",
         # "Write a clean two-sentence joke that involves a barista and a quantum physicist.",
@@ -647,6 +659,7 @@ if __name__ == "__main__":
         # "Write eight lines of pop lyrics about missing the last metro in Paris, include the repeated hook “last train’s gone.”",
     ]
 
+    # IMPORTANT: Verbalizer prompts: these are the questions / prompts we send to the verbalizer model, along with context prompt activations
     verbalizer_prompts: list[str] = [
         "Can you describe what is happening in this text?",
     ]
