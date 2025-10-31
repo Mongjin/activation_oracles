@@ -143,8 +143,8 @@ def calculate_confidence_interval(accuracies, confidence=0.95):
 
     return margin
 
-def plot_results(results_by_lora, extra_bars=None):
-    """Create a bar chart of average accuracy by investigator LoRA, with optional extra bars."""
+def plot_results(results_by_lora, highlight_keyword, highlight_color="#FDB813", highlight_hatch="////"):
+    """Create a bar chart of average accuracy by investigator LoRA, highlighting exactly one LoRA."""
     if not results_by_lora:
         print("No results to plot!")
         return
@@ -155,33 +155,24 @@ def plot_results(results_by_lora, extra_bars=None):
     error_bars = []
 
     for lora_path, accuracies in results_by_lora.items():
-        # Extract a readable name from the path
         lora_name = lora_path.split("/")[-1]
         lora_names.append(lora_name)
         mean_acc = sum(accuracies) / len(accuracies)
         mean_accuracies.append(mean_acc)
-
-        # Calculate 95% CI
         ci_margin = calculate_confidence_interval(accuracies)
         error_bars.append(ci_margin)
-
         print(f"{lora_name}: {mean_acc:.3f} ± {ci_margin:.3f} (n={len(accuracies)} records)")
 
-    # Optional: append extra bars
-    extra_labels = []
-    extra_values = []
-    extra_errors = []
-    if extra_bars:
-        for b in extra_bars:
-            extra_labels.append(b["label"])
-            extra_values.append(b["value"])
-            extra_errors.append(b["error"])
+    # Assert exactly one match and move it to index 0
+    matches = [i for i, name in enumerate(lora_names) if highlight_keyword in name]
+    assert len(matches) == 1, f"Keyword '{highlight_keyword}' matched {len(matches)}: {[lora_names[i] for i in matches]}"
+    m = matches[0]
+    order = [m] + [i for i in range(len(lora_names)) if i != m]
+    lora_names = [lora_names[i] for i in order]
+    mean_accuracies = [mean_accuracies[i] for i in order]
+    error_bars = [error_bars[i] for i in order]
 
-    all_names = lora_names + extra_labels
-    all_means = mean_accuracies + extra_values
-    all_errors = error_bars + extra_errors
-
-    # Print dictionary template for labels (only for LoRA entries)
+    # Print dictionary template for labels (for LoRA entries)
     print("\n" + "=" * 60)
     print("Copy this dictionary and fill in your custom labels:")
     print("=" * 60)
@@ -191,56 +182,50 @@ def plot_results(results_by_lora, extra_bars=None):
     print("}")
     print("=" * 60 + "\n")
 
-    # Create bar chart with different colors for each bar
+    # Create bar chart
     fig, ax = plt.subplots(figsize=(12, 6))
-    colors = plt.cm.tab10(np.linspace(0, 1, len(all_names)))
-    bars = ax.bar(
-        range(len(all_names)), all_means, color=colors, yerr=all_errors, capsize=5, error_kw={"linewidth": 2}
-    )
+    colors = list(plt.cm.tab10(np.linspace(0, 1, len(lora_names))))
+    colors[0] = highlight_color  # highlighted bar color
+    bars = ax.bar(range(len(lora_names)), mean_accuracies, color=colors, yerr=error_bars, capsize=5, error_kw={"linewidth": 2})
+
+    # Distinctive styling for the highlighted bar
+    bars[0].set_hatch(highlight_hatch)
+    bars[0].set_edgecolor("black")
+    bars[0].set_linewidth(2.0)
 
     ax.set_xlabel("Investigator LoRA", fontsize=12)
     ax.set_ylabel("Average Accuracy", fontsize=12)
     ax.set_title(TITLE, fontsize=14)
-    ax.set_xticks(range(len(all_names)))
-    ax.set_xticklabels([])  # Keep x-axis labels hidden; legend carries names
+    ax.set_xticks(range(len(lora_names)))
+    ax.set_xticklabels([])  # use legend instead
     ax.set_ylim(0, 1.1)
     ax.grid(axis="y", alpha=0.3)
 
-    # Add value labels on bars
-    for bar, acc, err in zip(bars, all_means, all_errors):
+    # Value labels on bars
+    for bar, acc, err in zip(bars, mean_accuracies, error_bars):
         height = bar.get_height()
-        ax.text(
-            bar.get_x() + bar.get_width() / 2.0,
-            height + err + 0.02,
-            f"{acc:.3f}",
-            ha="center",
-            va="bottom",
-            fontsize=10,
-        )
+        ax.text(bar.get_x() + bar.get_width() / 2.0, height + err + 0.02, f"{acc:.3f}", ha="center", va="bottom", fontsize=10)
 
-    # Legend: use CUSTOM_LABELS for LoRA bars; extras use their own labels
+    # Legend uses CUSTOM_LABELS when available
     legend_labels = []
     for name in lora_names:
         if CUSTOM_LABELS and name in CUSTOM_LABELS and CUSTOM_LABELS[name]:
             legend_labels.append(CUSTOM_LABELS[name])
         else:
             legend_labels.append(name)
-    legend_labels.extend(extra_labels)
 
     ax.legend(bars, legend_labels, loc="upper center", bbox_to_anchor=(0.5, -0.15), fontsize=10, ncol=2, frameon=False)
 
     plt.tight_layout()
-    plt.subplots_adjust(bottom=0.2)  # Make room for legend below
+    plt.subplots_adjust(bottom=0.2)
     plt.savefig(OUTPUT_PATH, dpi=300, bbox_inches="tight")
     print(f"\nPlot saved as '{OUTPUT_PATH}'")
-    # plt.show()
-
-def plot_by_keyword_with_extras(results_by_lora, required_keyword, extra_bars, output_path=None):
+    # # plt.show()
+def plot_by_keyword_with_extras(results_by_lora, required_keyword, extra_bars, output_path=None, highlight_color="#FDB813", highlight_hatch="////"):
     """
     Plot exactly one LoRA (selected by required_keyword in its name) plus extra bars.
     Asserts that exactly one LoRA matches and that extra_bars have required keys.
     """
-    # Build (name, accuracies) using the last path segment as the LoRA "name"
     entries = []
     for lora_path, accuracies in results_by_lora.items():
         lora_name = lora_path.split("/")[-1]
@@ -252,6 +237,7 @@ def plot_by_keyword_with_extras(results_by_lora, required_keyword, extra_bars, o
     selected_name, selected_accs = matches[0]
     mean_acc = sum(selected_accs) / len(selected_accs)
     ci = calculate_confidence_interval(selected_accs)
+    print(f"Selected LoRA: {selected_name} -> {mean_acc:.3f} ± {ci:.3f} (n={len(selected_accs)})")
 
     assert isinstance(extra_bars, list) and len(extra_bars) > 0, "extra_bars must be a non-empty list"
     for b in extra_bars:
@@ -261,11 +247,15 @@ def plot_by_keyword_with_extras(results_by_lora, required_keyword, extra_bars, o
     values = [mean_acc] + [b["value"] for b in extra_bars]
     errors = [ci] + [b["error"] for b in extra_bars]
 
-    print(f"Selected LoRA: {selected_name} -> {mean_acc:.3f} ± {ci:.3f} (n={len(selected_accs)})")
-
     fig, ax = plt.subplots(figsize=(12, 6))
-    colors = plt.cm.tab10(np.linspace(0, 1, len(labels)))
+    colors = list(plt.cm.tab10(np.linspace(0, 1, len(labels))))
+    colors[0] = highlight_color
     bars = ax.bar(range(len(labels)), values, color=colors, yerr=errors, capsize=5, error_kw={"linewidth": 2})
+
+    # Distinctive styling for the highlighted bar
+    bars[0].set_hatch(highlight_hatch)
+    bars[0].set_edgecolor("black")
+    bars[0].set_linewidth(2.0)
 
     ax.set_xlabel("Selected LoRA + Extras", fontsize=12)
     ax.set_ylabel("Average Accuracy", fontsize=12)
@@ -277,14 +267,7 @@ def plot_by_keyword_with_extras(results_by_lora, required_keyword, extra_bars, o
 
     for bar, acc, err in zip(bars, values, errors):
         height = bar.get_height()
-        ax.text(
-            bar.get_x() + bar.get_width() / 2.0,
-            height + err + 0.02,
-            f"{acc:.3f}",
-            ha="center",
-            va="bottom",
-            fontsize=10,
-        )
+        ax.text(bar.get_x() + bar.get_width() / 2.0, height + err + 0.02, f"{acc:.3f}", ha="center", va="bottom", fontsize=10)
 
     legend_labels = []
     if CUSTOM_LABELS and selected_name in CUSTOM_LABELS and CUSTOM_LABELS[selected_name]:
@@ -355,7 +338,7 @@ def main():
     results_by_lora, results_by_lora_word = load_results(OUTPUT_JSON_DIR)
 
     # Plot 1: Overall accuracy by investigator
-    plot_results(results_by_lora)
+    plot_results(results_by_lora, highlight_keyword="latentqa_cls_past_lens")
 
     plot_by_keyword_with_extras(results_by_lora, required_keyword="latentqa_cls_past_lens", extra_bars=extra_bars)
 
