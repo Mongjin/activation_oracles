@@ -14,7 +14,7 @@ FONT_SIZE_LEGEND = 14  # Legend text size
 
 # Configuration
 OUTPUT_JSON_DIR = "experiments/personaqa_single_eval_results_all/Qwen3-8B_yes_no_v1"
-OUTPUT_JSON_DIR = "experiments/personaqa_results/Qwen3-8B_yes_no"
+OUTPUT_JSON_DIR = "experiments/personaqa_all_persona_eval_results/Qwen3-8B_yes_no"
 
 DATA_DIR = OUTPUT_JSON_DIR.split("/")[-1]
 

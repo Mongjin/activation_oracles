@@ -22,9 +22,6 @@ echo "✓ plot_personaqa_results.py completed"
 python "$SCRIPT_DIR/plot_secret_keeping_results.py"
 echo "✓ plot_secret_keeping_results.py completed"
 
-python "$SCRIPT_DIR/plot_single_personaqa_results.py"
-echo "✓ plot_single_personaqa_results.py completed"
-
 python "$SCRIPT_DIR/plot_ssc_results.py"
 echo "✓ plot_ssc_results.py completed"
 

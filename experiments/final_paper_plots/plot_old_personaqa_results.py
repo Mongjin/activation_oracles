@@ -11,6 +11,9 @@ FONT_SIZE_Y_AXIS_LABEL = 16  # Y-axis labels (e.g., "Average Accuracy")
 FONT_SIZE_BAR_VALUE = 16  # Numbers above each bar
 FONT_SIZE_LEGEND = 14  # Legend text size
 
+
+# NOTE: plot_single_personaqa_results.py is used for old data format. Use plot_personaqa_results.py for new data format. We haven't regenerated the data for the new format yet.
+
 # Configuration
 OUTPUT_JSON_DIR = "experiments/personaqa_single_eval_results_all/Qwen3-8B_yes_no_v1"
 # OUTPUT_JSON_DIR = "experiments/personaqa_single_eval_results/Qwen3-8B_yes_no"
@@ -239,7 +242,7 @@ def plot_results(results_by_lora, highlight_keyword, highlight_color="#FDB813", 
         bars,
         legend_labels,
         loc="upper center",
-        bbox_to_anchor=(0.5, -0.15),
+        bbox_to_anchor=(0.5, -0.05),
         fontsize=FONT_SIZE_LEGEND,
         ncol=3,
         frameon=False,
