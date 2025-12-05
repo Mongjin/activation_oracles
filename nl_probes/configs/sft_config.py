@@ -38,6 +38,7 @@ class SelfInterpTrainingConfig:
     # --- Training ---
     num_epochs: int = 1
     lr: float = 1e-5
+    gradient_accumulation_steps: int = 1
     max_grad_norm: float = 1.0
     eval_steps: int = 9_999_999  # effectively off by default
     eval_on_start: bool = False
