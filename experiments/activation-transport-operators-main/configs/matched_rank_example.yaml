@@ -1,0 +1,41 @@
+# Example full config structure:
+defaults:
+  - eval
+  - _self_
+
+experiment_name: "matched_rank_analysis_experiment"
+
+# Enable matched-rank analysis
+run_matched_rank: true
+matched_rank_only: false
+
+# Matched-rank specific settings
+matched_rank:
+  # ranks: [10, 50, 200, 500, 1000, 1500, 2000, 2304]
+  rank_start: 1
+  rank_stop: 2304
+  rank_step: 100
+  alpha_grid: [1500.0]
+
+# Standard eval settings (required even for matched-rank analysis)
+eval:
+  Ls: [6, 8, 10]  # Source layers
+  ks: [1, 2]      # Target layer offsets (L+k)
+  j_policy: ["random", "top_k"]  # Feature selection policies
+
+# Other required settings...
+activation_dir: "${oc.env:ACTIVATION_DIR}"
+seed: 42
+activation_dtype: "float32"
+
+# Logging configuration
+logger:
+  project: "activation-transport-matched-rank"
+  entity: "${oc.env:WANDB_ENTITY}"
+  wandb_mode: "online"
+
+# SAE configuration (still needed for data loading)
+sae:
+  release: "gpt2-small-res-jb"
+  layer: 6  # Will be overridden for each layer
+  trainer_id: 0

@@ -1,0 +1,61 @@
+# Evaluation configuration
+defaults:
+  - _self_
+  - logger: wandb_disabled
+  - model: gemma_2_2b
+  - sae: residual_stream
+
+# Global
+seed: 42
+experiment_name: eval_transport_operators
+
+# Evaluation mode: "baselines", "pretrained", or "dummy"
+eval_mode: pretrained
+
+
+# Matched-rank specific settings
+matched_rank:
+  # ranks: [10, 50, 200, 500, 1000, 1500, 2000, 2304]
+  rank_start: 1
+  rank_stop: 2304
+  rank_step: 100
+  alpha_grid: [1500.0]
+
+# Evaluation parameters
+eval:
+  # List of layers to evaluate
+  Ls: [8]
+  
+  # List of k values (layer offsets)
+  ks: [1]
+  
+  # List of j_policy values
+  j_policy: ["j==i"]
+  
+  # Decoder configuration
+  decoders:
+    normalize: true
+    device: auto
+  
+  # Scoring configuration
+  scoring:
+    include_residual_metrics: true
+  
+  val_batch_size: 128
+  filter_inactive_features: true
+  max_features: 819
+
+run_matched_rank: false
+matched_rank_only: false
+
+# Baseline transport operators configuration
+baselines:
+  # Enable Identity baseline transport operator  
+  enable_identity: false
+
+activation_dir: "./activations-gemma2-2b-slimpajama-250k"
+feature_ids_dir: "./feature_ids"
+output_file_name: "eval_transport_operators_results_${eval.Ls}_${eval.ks}.json"
+
+activation_dtype: float32
+

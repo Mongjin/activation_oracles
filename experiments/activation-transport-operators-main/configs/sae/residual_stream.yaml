@@ -1,0 +1,7 @@
+# Gemma Scope Residual Stream SAEs
+release: gemma-scope-${model.size}-pt-res-canonical
+layer: 20
+width: 16k
+sae_id: layer_${sae.layer}/width_${sae.width}/canonical
+device: auto
+force_download: false
