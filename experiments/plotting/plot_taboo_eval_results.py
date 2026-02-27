@@ -14,7 +14,7 @@ OUTPUT_JSON_DIR = "experiments/taboo_eval_results/Qwen3-8B_open_ended_direct"
 OUTPUT_JSON_DIR = "experiments/taboo_eval_results/Qwen3-8B_yes_no_direct"
 # OUTPUT_JSON_DIR = "experiments/taboo_eval_results/Qwen3-32B_open_ended_direct"
 # OUTPUT_JSON_DIR = "experiments/taboo_eval_results/Qwen3-32B_yes_no_direct"
-OUTPUT_JSON_DIR = "experiments/taboo_eval_results/gemma-2-9b-it_open_ended_all_direct"
+OUTPUT_JSON_DIR = "experiments/taboo_eval_results/gemma-2-9b-it_open_ended_all_direct_test"
 # OUTPUT_JSON_DIR = "experiments/taboo_eval_results/Qwen3-8B_open_ended_all_direct"
 
 DATA_DIR = OUTPUT_JSON_DIR.split("/")[-1]

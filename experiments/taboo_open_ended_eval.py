@@ -16,7 +16,13 @@ import nl_probes.base_experiment as base_experiment
 from nl_probes.base_experiment import VerbalizerInputInfo, VerbalizerResults
 from nl_probes.utils.common import load_model, load_tokenizer
 
+import argparse
+
 if __name__ == "__main__":
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--lang_type", type=str, default=None, help="Language code for multilingual datasets (e.g., ko, ja, zh, fr, de, es). Default is None (English).")
+    args = parser.parse_args()
+
     # Model and dtype
     # model_name = "Qwen/Qwen3-8B"
     model_name = "google/gemma-2-9b-it"
@@ -89,6 +95,9 @@ if __name__ == "__main__":
     PROMPT_TYPE = "all_direct"
     # PROMPT_TYPE = "all_standard"
 
+    # LANG_TYPE can be None (English), "ko", "ja", "zh", "fr", "de", "es"
+    LANG_TYPE: Optional[str] = args.lang_type
+
     # DATASET_TYPE = "val"
     DATASET_TYPE = "test"
 
@@ -112,8 +121,9 @@ if __name__ == "__main__":
         segment_start_idx=segment_start,
     )
 
-    experiments_dir: str = "experiments/taboo_eval_results"
-    output_json_dir: str = f"{experiments_dir}/{model_name_str}_open_ended_{PROMPT_TYPE}_{DATASET_TYPE}"
+    experiments_dir: str = "./taboo_eval_results"
+    lang_suffix = f"_{LANG_TYPE}" if LANG_TYPE else ""
+    output_json_dir: str = f"{experiments_dir}/{model_name_str}_open_ended_{PROMPT_TYPE}{lang_suffix}_{DATASET_TYPE}"
 
     os.makedirs(experiments_dir, exist_ok=True)
     os.makedirs(output_json_dir, exist_ok=True)
@@ -126,12 +136,15 @@ if __name__ == "__main__":
 
     # IMPORTANT: Context prompts: we send these to the target model and collect activations
     if PROMPT_TYPE == "all_direct":
-        context_prompt_filename = f"datasets/taboo/taboo_direct_{DATASET_TYPE}.txt"
+        if LANG_TYPE:
+            context_prompt_filename = f"../datasets/taboo/taboo_direct_{LANG_TYPE}_{DATASET_TYPE}.txt"
+        else:
+            context_prompt_filename = f"../datasets/taboo/taboo_direct_{DATASET_TYPE}.txt"
 
         with open(context_prompt_filename, "r") as f:
             context_prompts = [line.strip() for line in f]
     elif PROMPT_TYPE == "all_standard":
-        context_prompt_filename = f"datasets/taboo/taboo_standard_{DATASET_TYPE}.txt"
+        context_prompt_filename = f"../datasets/taboo/taboo_standard_{DATASET_TYPE}.txt"
 
         with open(context_prompt_filename, "r") as f:
             context_prompts = [line.strip() for line in f]
