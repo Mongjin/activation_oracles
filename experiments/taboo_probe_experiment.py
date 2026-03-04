@@ -9,6 +9,7 @@ from transformers import AutoTokenizer, AutoModelForCausalLM
 from peft import PeftModel
 from datasets import load_dataset
 import numpy as np
+import copy
 
 # nl_probes utilities
 from nl_probes.utils.common import layer_percent_to_layer, load_model, load_tokenizer
@@ -49,6 +50,7 @@ def train_probe_loop(model, train_loader, val_loader, device, lr=1e-3, epochs=15
     optimizer = optim.Adam(model.parameters(), lr=lr)
     best_acc = 0
     best_metrics = (0, 0, 0) # P, R, F1
+    best_state = None
     
     for epoch in range(epochs):
         model.train()
@@ -80,11 +82,15 @@ def train_probe_loop(model, train_loader, val_loader, device, lr=1e-3, epochs=15
         acc = correct / total if total > 0 else 0
         if acc > best_acc:
             best_acc = acc
+            best_state = copy.deepcopy(model.state_dict())
             if is_binary:
                 all_preds_t = torch.cat(all_preds)
                 all_labels_t = torch.cat(all_labels)
                 best_metrics = get_binary_metrics(all_preds_t, all_labels_t)
                 
+    if best_state is not None:
+        model.load_state_dict(best_state)
+        
     if is_binary:
         return best_acc, best_metrics
     return best_acc
