@@ -10,6 +10,7 @@ from peft import PeftModel
 from datasets import load_dataset
 import numpy as np
 import copy
+import json
 
 # nl_probes utilities
 from nl_probes.utils.common import layer_percent_to_layer, load_model, load_tokenizer
@@ -173,10 +174,23 @@ def main():
             for l in layers: test_acts[l].extend(a_test[l])
             test_labels.extend([word_to_idx[word]] * len(a_test[layers[0]]))
 
+    # Results dictionary for JSON storage
+    results = {
+        "model_name": args.model_name,
+        "target_word": args.target_word,
+        "layers": {}
+    }
+
     # 2. Train Probes on Base Model
     probes = {l: {} for l in layers}
     for i, l in enumerate(layers):
         print(f"\n--- Layer {l} ({layer_percents[i]}%) ---")
+        layer_results = {
+            "percent": layer_percents[i],
+            "base_model": {},
+            "ft_model": {}
+        }
+        
         X_train, Y_train = torch.stack(train_acts[l]), torch.tensor(train_labels)
         X_test, Y_test = torch.stack(test_acts[l]), torch.tensor(test_labels)
         
@@ -189,16 +203,19 @@ def main():
         mc_acc = train_probe_loop(lp_mc, train_loader, val_loader, device, epochs=args.epochs)
         print(f"Base Multi-class Linear (Test Set) Acc: {mc_acc:.4f}")
         probes[l]['lp_mc'] = lp_mc
+        layer_results["base_model"]["mc_linear_acc"] = mc_acc
 
         print("Training Multi-class MLP Probe...")
         mlp_mc = MLPProbe(d_model, 512, len(secret_words)).to(device)
         mc_mlp_acc = train_probe_loop(mlp_mc, train_loader, val_loader, device, epochs=args.epochs)
         print(f"Base Multi-class MLP (Test Set) Acc: {mc_mlp_acc:.4f}")
         probes[l]['mlp_mc'] = mlp_mc
+        layer_results["base_model"]["mc_mlp_acc"] = mc_mlp_acc
 
         # Binary Probes for ALL secret words
         probes[l]['lp_bin'] = {}
         probes[l]['mlp_bin'] = {}
+        layer_results["base_model"]["binary_metrics"] = {}
         
         print(f"Training Binary Probes for all {len(secret_words)} secret words...")
         bin_metrics_list = []
@@ -220,19 +237,24 @@ def main():
             mlp_acc, (mp, mr, mf1) = train_probe_loop(mlp, train_loader_bin, val_loader_bin, device, epochs=args.epochs, is_binary=True)
             probes[l]['mlp_bin'][word] = mlp
             
+            layer_results["base_model"]["binary_metrics"][word] = {
+                "linear": {"acc": acc, "p": p, "r": r, "f1": f1},
+                "mlp": {"acc": mlp_acc, "p": mp, "r": mr, "f1": mf1}
+            }
             if word == args.target_word:
                 print(f"  Target word '{word}' - Linear F1: {f1:.4f}, MLP F1: {mf1:.4f}")
             bin_metrics_list.append(f1)
             
         avg_f1 = sum(bin_metrics_list) / len(bin_metrics_list)
         print(f"Base Binary Linear Avg F1 (all words): {avg_f1:.4f}")
+        results["layers"][l] = layer_results
 
     # 3. Transfer Evaluation to FT Model (Using UNSEEN Test set)
-    model_name = args.model_name.split("/")[-1]
-    if "Qwen" in model_name:
+    model_name_short = args.model_name.split("/")[-1]
+    if "Qwen" in model_name_short:
         # lora_path = f"adamkarvonen/Qwen3-8B-taboo-{args.target_word}_50_mix"
         lora_path = f"adamkarvonen/Qwen3-8B-taboo-{args.target_word}"
-    elif "gemma" in model_name:
+    elif "gemma" in model_name_short:
         lora_path = f"bcywinski/gemma-2-9b-it-taboo-{args.target_word}"
     print(f"\nTesting Transfer to FT Model: {lora_path}")
     try:
@@ -257,14 +279,17 @@ def main():
             
             # 1. Evaluate Target Word Probe (The one that was fine-tuned)
             p, r, f1 = evaluate_binary(probes[l]['lp_bin'][args.target_word], X_ft, Y_ft_bin, device)
+            results["layers"][l]["ft_model"]["target_word_linear"] = {"p": p, "r": r, "f1": f1}
             print(f"\nLayer {l} FT Transfer (Binary Linear - Target Word '{args.target_word}'):")
             print(f"  P: {p:.4f}, R: {r:.4f}, F1: {f1:.4f}")
 
             p, r, f1 = evaluate_binary(probes[l]['mlp_bin'][args.target_word], X_ft, Y_ft_bin, device)
+            results["layers"][l]["ft_model"]["target_word_mlp"] = {"p": p, "r": r, "f1": f1}
             print(f"Layer {l} FT Transfer (Binary MLP - Target Word '{args.target_word}'):")
             print(f"  P: {p:.4f}, R: {r:.4f}, F1: {f1:.4f}")
 
             # 2. Evaluate Other Word Probes (Control group - should remain stable)
+            results["layers"][l]["ft_model"]["other_words"] = {}
             other_f1s_lp = []
             other_f1s_mlp = []
             for word in secret_words:
@@ -272,13 +297,24 @@ def main():
                 idx = word_to_idx[word]
                 Y_ft_word_bin = (Y_ft == idx).long()
                 
-                _, _, f1_lp = evaluate_binary(probes[l]['lp_bin'][word], X_ft, Y_ft_word_bin, device)
-                _, _, f1_mlp = evaluate_binary(probes[l]['mlp_bin'][word], X_ft, Y_ft_word_bin, device)
+                p_lp, r_lp, f1_lp = evaluate_binary(probes[l]['lp_bin'][word], X_ft, Y_ft_word_bin, device)
+                p_mlp, r_mlp, f1_mlp = evaluate_binary(probes[l]['mlp_bin'][word], X_ft, Y_ft_word_bin, device)
+                
+                results["layers"][l]["ft_model"]["other_words"][word] = {
+                    "linear": {"p": p_lp, "r": r_lp, "f1": f1_lp},
+                    "mlp": {"p": p_mlp, "r": r_mlp, "f1": f1_mlp}
+                }
+                
+                print(f"\nLayer {l} FT Transfer (Binary Linear - Word '{word}'):")
+                print(f"  P: {p_lp:.4f}, R: {r_lp:.4f}, F1: {f1_lp:.4f}")
+                print(f"Layer {l} FT Transfer (Binary MLP - Word '{word}'):")
+                print(f"  P: {p_mlp:.4f}, R: {r_mlp:.4f}, F1: {f1_mlp:.4f}")
                 other_f1s_lp.append(f1_lp)
                 other_f1s_mlp.append(f1_mlp)
             
             avg_other_f1_lp = sum(other_f1s_lp) / len(other_f1s_lp)
             avg_other_f1_mlp = sum(other_f1s_mlp) / len(other_f1s_mlp)
+            results["layers"][l]["ft_model"]["other_words_avg"] = {"linear_f1": avg_other_f1_lp, "mlp_f1": avg_other_f1_mlp}
             print(f"Layer {l} FT Transfer (Other Words Average):")
             print(f"  Linear Avg F1: {avg_other_f1_lp:.4f}, MLP Avg F1: {avg_other_f1_mlp:.4f}")
                 
@@ -292,8 +328,20 @@ def main():
                 mc_mlp_preds = torch.argmax(mc_mlp_logits, dim=1).cpu()
                 mc_mlp_ft_acc = (mc_mlp_preds[Y_ft_bin == 1] == word_to_idx[args.target_word]).float().mean().item()
                 
+            results["layers"][l]["ft_model"]["mc_linear_acc"] = mc_ft_acc
+            results["layers"][l]["ft_model"]["mc_mlp_acc"] = mc_mlp_ft_acc
             print(f"Layer {l} FT Transfer Multi-class Accuracy (on Target Word):")
             print(f"  Linear: {mc_ft_acc:.4f}, MLP: {mc_mlp_ft_acc:.4f}")
+
+        # 4. Save to JSON
+        os.makedirs("./taboo_eval_results", exist_ok=True)
+        filename = f"./taboo_eval_results/taboo_probe_transfer_{model_name_short.replace('/', '_')}_{args.target_word}.json"
+        with open(filename, "w") as f:
+            json.dump(results, f, indent=4)
+        print(f"\nResults saved to: {filename}")
+            
+    except Exception as e:
+        print(f"FT Evaluation Error: {e}")
             
     except Exception as e:
         print(f"FT Evaluation Error: {e}")
