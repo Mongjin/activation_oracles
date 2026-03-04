@@ -137,6 +137,10 @@ def get_text_only_lora_targets(model_name: str) -> str | None:
 def get_hf_submodule(model: AutoModelForCausalLM, layer: int, use_lora: bool = False):
     """Gets the residual stream submodule for HF transformers"""
     model_name = model.config._name_or_path
+    
+    # Auto-detect if it's a PEFT model
+    if not use_lora and hasattr(model, "base_model") and hasattr(model, "peft_config"):
+        use_lora = True
 
     if use_lora:
         if "pythia" in model_name:
