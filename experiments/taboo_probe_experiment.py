@@ -136,6 +136,7 @@ def main():
         mlp_mc = MLPProbe(d_model, 512, len(secret_words)).to(device)
         mc_mlp_acc = train_probe_loop(mlp_mc, train_loader, val_loader, device, epochs=args.epochs)
         print(f"Base Multi-class MLP Acc: {mc_mlp_acc:.4f}")
+        probes[l]['mlp_mc'] = mlp_mc
 
         # Binary (Target word vs Others)
         Y_bin = (Y == word_to_idx[args.target_word]).long()
@@ -148,12 +149,18 @@ def main():
         print(f"Base Binary Linear Acc: {bin_acc:.4f}")
         probes[l]['lp_bin'] = lp_bin
 
+        print(f"Training Binary MLP Probe for '{args.target_word}'...")
+        mlp_bin = MLPProbe(d_model, 512, 1).to(device)
+        bin_mlp_acc = train_probe_loop(mlp_bin, train_loader_bin, val_loader_bin, device, epochs=args.epochs, is_binary=True)
+        print(f"Base Binary MLP Acc: {bin_mlp_acc:.4f}")
+        probes[l]['mlp_bin'] = mlp_bin
+
     # 3. Transfer Evaluation to Fine-tuned Model (Using SAME conversation input)
     model_name = args.model_name.split("/")[-1]
     if "Qwen" in model_name:
         lora_path = f"adamkarvonen/Qwen3-8B-taboo-{args.target_word}_50_mix"
     elif "gemma" in model_name:
-        lora_path = f"adamkarvonen/gemma-2-9b-it-taboo-{args.target_word}"
+        lora_path = f"bcywinski/gemma-2-9b-it-taboo-{args.target_word}"
     print(f"\nTesting Transfer to FT Model: {lora_path}")
     try:
         ft_model = PeftModel.from_pretrained(base_model, lora_path)
@@ -166,18 +173,30 @@ def main():
             X_ft = torch.stack(ft_acts_dict[l]).to(device)
             # Evaluate using probes trained on Base Model
             with torch.no_grad():
-                # Binary
+                # Binary Linear
                 bin_logits = probes[l]['lp_bin'](X_ft)
                 bin_preds = (torch.sigmoid(bin_logits.view(-1)) > 0.5).long()
                 bin_ft_acc = (bin_preds == 1).float().mean().item()
+
+                # Binary MLP
+                bin_mlp_logits = probes[l]['mlp_bin'](X_ft)
+                bin_mlp_preds = (torch.sigmoid(bin_mlp_logits.view(-1)) > 0.5).long()
+                bin_mlp_ft_acc = (bin_mlp_preds == 1).float().mean().item()
                 
-                # Multi-class
+                # Multi-class Linear
                 mc_logits = probes[l]['lp_mc'](X_ft)
                 mc_preds = torch.argmax(mc_logits, dim=1)
                 mc_ft_acc = (mc_preds == word_to_idx[args.target_word]).float().mean().item()
+
+                # Multi-class MLP
+                mc_mlp_logits = probes[l]['mlp_mc'](X_ft)
+                mc_mlp_preds = torch.argmax(mc_mlp_logits, dim=1)
+                mc_mlp_ft_acc = (mc_mlp_preds == word_to_idx[args.target_word]).float().mean().item()
                 
-            print(f"Layer {l} FT Transfer Acc (Binary): {bin_ft_acc:.4f}")
-            print(f"Layer {l} FT Transfer Acc (Multi-class): {mc_ft_acc:.4f}")
+            print(f"Layer {l} FT Transfer Acc (Binary Linear): {bin_ft_acc:.4f}")
+            print(f"Layer {l} FT Transfer Acc (Binary MLP): {bin_mlp_ft_acc:.4f}")
+            print(f"Layer {l} FT Transfer Acc (Multi-class Linear): {mc_ft_acc:.4f}")
+            print(f"Layer {l} FT Transfer Acc (Multi-class MLP): {mc_mlp_ft_acc:.4f}")
             
         base_model.unload() # Cleanup LoRA
     except Exception as e:
