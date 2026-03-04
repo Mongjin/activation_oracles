@@ -258,13 +258,19 @@ def main():
             mlp_bin_base[word] = mlp
             
             if word == args.target_word:
-                layer_results["base_probes"]["base_eval"][word] = {"linear_f1": f1, "mlp_f1": mf1}
+                layer_results["base_probes"]["base_eval"][word] = {
+                    "linear": {"p": p, "r": r, "f1": f1},
+                    "mlp": {"p": mp, "r": mr, "f1": mf1}
+                }
 
         # Transfer Eval: Base Probes -> FT Data
         print("Evaluating Base Probes on FT Data (Base -> FT)...")
-        p, r, f1_lp = evaluate_binary(lp_bin_base[args.target_word], XF_test, (YF_test == word_to_idx[args.target_word]).long(), device)
-        p, r, f1_mlp = evaluate_binary(mlp_bin_base[args.target_word], XF_test, (YF_test == word_to_idx[args.target_word]).long(), device)
-        layer_results["base_probes"]["ft_eval"][args.target_word] = {"linear_f1": f1_lp, "mlp_f1": f1_mlp}
+        p_lp, r_lp, f1_lp = evaluate_binary(lp_bin_base[args.target_word], XF_test, (YF_test == word_to_idx[args.target_word]).long(), device)
+        p_mlp, r_mlp, f1_mlp = evaluate_binary(mlp_bin_base[args.target_word], XF_test, (YF_test == word_to_idx[args.target_word]).long(), device)
+        layer_results["base_probes"]["ft_eval"][args.target_word] = {
+            "linear": {"p": p_lp, "r": r_lp, "f1": f1_lp},
+            "mlp": {"p": p_mlp, "r": r_mlp, "f1": f1_mlp}
+        }
         
         with torch.no_grad():
             mc_preds = torch.argmax(lp_mc_base(XF_test.to(device)), dim=1).cpu()
@@ -302,13 +308,19 @@ def main():
             mlp_bin_ft[word] = mlp
             
             if word == args.target_word:
-                layer_results["ft_probes"]["ft_eval"][word] = {"linear_f1": f1, "mlp_f1": mf1}
+                layer_results["ft_probes"]["ft_eval"][word] = {
+                    "linear": {"p": p, "r": r, "f1": f1},
+                    "mlp": {"p": mp, "r": mr, "f1": mf1}
+                }
 
         # Transfer Eval: FT Probes -> Base Data
         print("Evaluating FT Probes on Base Data (FT -> Base)...")
-        p, r, f1_lp = evaluate_binary(lp_bin_ft[args.target_word], XB_test, (YB_test == word_to_idx[args.target_word]).long(), device)
-        p, r, f1_mlp = evaluate_binary(mlp_bin_ft[args.target_word], XB_test, (YB_test == word_to_idx[args.target_word]).long(), device)
-        layer_results["ft_probes"]["base_eval"][args.target_word] = {"linear_f1": f1_lp, "mlp_f1": f1_mlp}
+        p_lp, r_lp, f1_lp = evaluate_binary(lp_bin_ft[args.target_word], XB_test, (YB_test == word_to_idx[args.target_word]).long(), device)
+        p_mlp, r_mlp, f1_mlp = evaluate_binary(mlp_bin_ft[args.target_word], XB_test, (YB_test == word_to_idx[args.target_word]).long(), device)
+        layer_results["ft_probes"]["base_eval"][args.target_word] = {
+            "linear": {"p": p_lp, "r": r_lp, "f1": f1_lp},
+            "mlp": {"p": p_mlp, "r": r_mlp, "f1": f1_mlp}
+        }
         
         with torch.no_grad():
             mc_preds = torch.argmax(lp_mc_ft(XB_test.to(device)), dim=1).cpu()
