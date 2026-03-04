@@ -122,13 +122,11 @@ def collect_acts_for_word(model, tokenizer, word, layers, device, start_idx=0, n
     
     for ex in tqdm(samples, desc=f"Collecting acts for '{word}' (idx {start_idx}-{end_idx})"):
         messages = ex['messages']
-        # Apply chat template to the FULL conversation (User hint + Assistant response)
         input_ids = tokenizer.apply_chat_template(messages, tokenize=True, return_tensors="pt", 
                                                   add_generation_prompt=False, enable_thinking=False).to(device)
         with torch.no_grad():
             activations = collect_activations_multiple_layers(model, submodules, {"input_ids": input_ids}, None, None)
             for l in layers:
-                # Extract activation from the LAST token of the full conversation sequence
                 acts_l[l].append(activations[l][0, -1, :].cpu().float())
     return acts_l
 
@@ -154,25 +152,54 @@ def main():
     d_model = base_model.config.hidden_size
 
     # 1. Base Model Activation Collection
-    # Train set (0 to num_samples)
-    train_acts = {l: [] for l in layers}
-    train_labels = []
-    # Test set (num_samples to num_samples + num_test_samples)
-    test_acts = {l: [] for l in layers}
-    test_labels = []
+    print("\n--- Collecting Activations from Base Model ---")
+    base_train_acts = {l: [] for l in layers}
+    base_test_acts = {l: [] for l in layers}
+    base_labels_train = []
+    base_labels_test = []
 
     for word in secret_words:
-        # Collect Train
         a_train = collect_acts_for_word(base_model, tokenizer, word, layers, device, 0, args.num_samples)
         if a_train:
-            for l in layers: train_acts[l].extend(a_train[l])
-            train_labels.extend([word_to_idx[word]] * len(a_train[layers[0]]))
+            for l in layers: base_train_acts[l].extend(a_train[l])
+            base_labels_train.extend([word_to_idx[word]] * len(a_train[layers[0]]))
         
-        # Collect Test
         a_test = collect_acts_for_word(base_model, tokenizer, word, layers, device, args.num_samples, args.num_test_samples)
         if a_test:
-            for l in layers: test_acts[l].extend(a_test[l])
-            test_labels.extend([word_to_idx[word]] * len(a_test[layers[0]]))
+            for l in layers: base_test_acts[l].extend(a_test[l])
+            base_labels_test.extend([word_to_idx[word]] * len(a_test[layers[0]]))
+
+    # 2. FT Model Activation Collection
+    model_name_short = args.model_name.split("/")[-1]
+    if "Qwen" in model_name_short:
+        lora_path = f"adamkarvonen/Qwen3-8B-taboo-{args.target_word}"
+    elif "gemma" in model_name_short:
+        lora_path = f"bcywinski/gemma-2-9b-it-taboo-{args.target_word}"
+    
+    print(f"\n--- Loading FT Model and Collecting Activations: {lora_path} ---")
+    ft_train_acts = {l: [] for l in layers}
+    ft_test_acts = {l: [] for l in layers}
+    ft_labels_train = []
+    ft_labels_test = []
+
+    try:
+        ft_model = PeftModel.from_pretrained(base_model, lora_path)
+        ft_model.eval()
+        
+        for word in secret_words:
+            a_train = collect_acts_for_word(ft_model, tokenizer, word, layers, device, 0, args.num_samples)
+            if a_train:
+                for l in layers: ft_train_acts[l].extend(a_train[l])
+                ft_labels_train.extend([word_to_idx[word]] * len(a_train[layers[0]]))
+            
+            a_test = collect_acts_for_word(ft_model, tokenizer, word, layers, device, args.num_samples, args.num_test_samples)
+            if a_test:
+                for l in layers: ft_test_acts[l].extend(a_test[l])
+                ft_labels_test.extend([word_to_idx[word]] * len(a_test[layers[0]]))
+        
+    except Exception as e:
+        print(f"Error collecting FT activations: {e}")
+        return
 
     # Results dictionary for JSON storage
     results = {
@@ -181,170 +208,122 @@ def main():
         "layers": {}
     }
 
-    # 2. Train Probes on Base Model
-    probes = {l: {} for l in layers}
+    # 3. Training and Evaluation
     for i, l in enumerate(layers):
-        print(f"\n--- Layer {l} ({layer_percents[i]}%) ---")
+        print(f"\n==================== Layer {l} ({layer_percents[i]}%) ====================")
         layer_results = {
             "percent": layer_percents[i],
-            "base_model": {},
-            "ft_model": {}
+            "base_probes": {"base_eval": {}, "ft_eval": {}},
+            "ft_probes": {"ft_eval": {}, "base_eval": {}}
         }
-        
-        X_train, Y_train = torch.stack(train_acts[l]), torch.tensor(train_labels)
-        X_test, Y_test = torch.stack(test_acts[l]), torch.tensor(test_labels)
-        
-        # Multi-class
-        train_loader = DataLoader(TensorDataset(X_train, Y_train), batch_size=16, shuffle=True)
-        val_loader = DataLoader(TensorDataset(X_test, Y_test), batch_size=16)
-        
-        print("Training Multi-class Linear Probe...")
-        lp_mc = LinearProbe(d_model, len(secret_words)).to(device)
-        mc_acc = train_probe_loop(lp_mc, train_loader, val_loader, device, epochs=args.epochs)
-        print(f"Base Multi-class Linear (Test Set) Acc: {mc_acc:.4f}")
-        probes[l]['lp_mc'] = lp_mc
-        layer_results["base_model"]["mc_linear_acc"] = mc_acc
 
-        print("Training Multi-class MLP Probe...")
-        mlp_mc = MLPProbe(d_model, 512, len(secret_words)).to(device)
-        mc_mlp_acc = train_probe_loop(mlp_mc, train_loader, val_loader, device, epochs=args.epochs)
-        print(f"Base Multi-class MLP (Test Set) Acc: {mc_mlp_acc:.4f}")
-        probes[l]['mlp_mc'] = mlp_mc
-        layer_results["base_model"]["mc_mlp_acc"] = mc_mlp_acc
+        # Data preparation
+        XB_train, YB_train = torch.stack(base_train_acts[l]), torch.tensor(base_labels_train)
+        XB_test, YB_test = torch.stack(base_test_acts[l]), torch.tensor(base_labels_test)
+        XF_train, YF_train = torch.stack(ft_train_acts[l]), torch.tensor(ft_labels_train)
+        XF_test, YF_test = torch.stack(ft_test_acts[l]), torch.tensor(ft_labels_test)
 
-        # Binary Probes for ALL secret words
-        probes[l]['lp_bin'] = {}
-        probes[l]['mlp_bin'] = {}
-        layer_results["base_model"]["binary_metrics"] = {}
+        base_train_loader = DataLoader(TensorDataset(XB_train, YB_train), batch_size=16, shuffle=True)
+        base_test_loader = DataLoader(TensorDataset(XB_test, YB_test), batch_size=16)
+        ft_train_loader = DataLoader(TensorDataset(XF_train, YF_train), batch_size=16, shuffle=True)
+        ft_test_loader = DataLoader(TensorDataset(XF_test, YF_test), batch_size=16)
+
+        # ---------------------------------------------------------
+        # A. TRAIN PROBES ON BASE MODEL
+        # ---------------------------------------------------------
+        print(f"\n[A] Training Probes on BASE Model Activations...")
         
-        print(f"Training Binary Probes for all {len(secret_words)} secret words...")
-        bin_metrics_list = []
-        for word in tqdm(secret_words, desc=f"Layer {l} Binary Probes"):
+        # Multi-class Probes
+        lp_mc_base = LinearProbe(d_model, len(secret_words)).to(device)
+        mc_acc_base = train_probe_loop(lp_mc_base, base_train_loader, base_test_loader, device, epochs=args.epochs)
+        mlp_mc_base = MLPProbe(d_model, 512, len(secret_words)).to(device)
+        mc_mlp_acc_base = train_probe_loop(mlp_mc_base, base_train_loader, base_test_loader, device, epochs=args.epochs)
+        layer_results["base_probes"]["base_eval"]["mc_linear_acc"] = mc_acc_base
+        layer_results["base_probes"]["base_eval"]["mc_mlp_acc"] = mc_mlp_acc_base
+
+        # Binary Probes (Linear + MLP)
+        lp_bin_base = {}
+        mlp_bin_base = {}
+        for word in tqdm(secret_words, desc="Base-trained Binary Probes"):
             idx = word_to_idx[word]
-            Y_train_bin = (Y_train == idx).long()
-            Y_test_bin = (Y_test == idx).long()
+            train_loader = DataLoader(TensorDataset(XB_train, (YB_train == idx).long()), batch_size=16, shuffle=True)
+            test_loader = DataLoader(TensorDataset(XB_test, (YB_test == idx).long()), batch_size=16)
             
-            train_loader_bin = DataLoader(TensorDataset(X_train, Y_train_bin), batch_size=16, shuffle=True)
-            val_loader_bin = DataLoader(TensorDataset(X_test, Y_test_bin), batch_size=16)
-            
-            # Linear
             lp = LinearProbe(d_model, 1).to(device)
-            acc, (p, r, f1) = train_probe_loop(lp, train_loader_bin, val_loader_bin, device, epochs=args.epochs, is_binary=True)
-            probes[l]['lp_bin'][word] = lp
+            acc, (p, r, f1) = train_probe_loop(lp, train_loader, test_loader, device, epochs=args.epochs, is_binary=True)
+            lp_bin_base[word] = lp
             
-            # MLP
             mlp = MLPProbe(d_model, 512, 1).to(device)
-            mlp_acc, (mp, mr, mf1) = train_probe_loop(mlp, train_loader_bin, val_loader_bin, device, epochs=args.epochs, is_binary=True)
-            probes[l]['mlp_bin'][word] = mlp
+            _, (mp, mr, mf1) = train_probe_loop(mlp, train_loader, test_loader, device, epochs=args.epochs, is_binary=True)
+            mlp_bin_base[word] = mlp
             
-            layer_results["base_model"]["binary_metrics"][word] = {
-                "linear": {"acc": acc, "p": p, "r": r, "f1": f1},
-                "mlp": {"acc": mlp_acc, "p": mp, "r": mr, "f1": mf1}
-            }
             if word == args.target_word:
-                print(f"  Target word '{word}' - Linear F1: {f1:.4f}, MLP F1: {mf1:.4f}")
-            bin_metrics_list.append(f1)
+                layer_results["base_probes"]["base_eval"][word] = {"linear_f1": f1, "mlp_f1": mf1}
+
+        # Transfer Eval: Base Probes -> FT Data
+        print("Evaluating Base Probes on FT Data (Base -> FT)...")
+        p, r, f1_lp = evaluate_binary(lp_bin_base[args.target_word], XF_test, (YF_test == word_to_idx[args.target_word]).long(), device)
+        p, r, f1_mlp = evaluate_binary(mlp_bin_base[args.target_word], XF_test, (YF_test == word_to_idx[args.target_word]).long(), device)
+        layer_results["base_probes"]["ft_eval"][args.target_word] = {"linear_f1": f1_lp, "mlp_f1": f1_mlp}
+        
+        with torch.no_grad():
+            mc_preds = torch.argmax(lp_mc_base(XF_test.to(device)), dim=1).cpu()
+            target_mask = (YF_test == word_to_idx[args.target_word])
+            mc_acc_ft = (mc_preds[target_mask] == word_to_idx[args.target_word]).float().mean().item()
+        layer_results["base_probes"]["ft_eval"]["mc_linear_acc_on_target"] = mc_acc_ft
+
+        # ---------------------------------------------------------
+        # B. TRAIN PROBES ON FT MODEL
+        # ---------------------------------------------------------
+        print(f"\n[B] Training Probes on FT Model Activations...")
+        
+        # Multi-class Probes
+        lp_mc_ft = LinearProbe(d_model, len(secret_words)).to(device)
+        mc_acc_ft = train_probe_loop(lp_mc_ft, ft_train_loader, ft_test_loader, device, epochs=args.epochs)
+        mlp_mc_ft = MLPProbe(d_model, 512, len(secret_words)).to(device)
+        mc_mlp_acc_ft = train_probe_loop(mlp_mc_ft, ft_train_loader, ft_test_loader, device, epochs=args.epochs)
+        layer_results["ft_probes"]["ft_eval"]["mc_linear_acc"] = mc_acc_ft
+        layer_results["ft_probes"]["ft_eval"]["mc_mlp_acc"] = mc_mlp_acc_ft
+
+        # Binary Probes (Linear + MLP)
+        lp_bin_ft = {}
+        mlp_bin_ft = {}
+        for word in tqdm(secret_words, desc="FT-trained Binary Probes"):
+            idx = word_to_idx[word]
+            train_loader = DataLoader(TensorDataset(XF_train, (YF_train == idx).long()), batch_size=16, shuffle=True)
+            test_loader = DataLoader(TensorDataset(XF_test, (YF_test == idx).long()), batch_size=16)
             
-        avg_f1 = sum(bin_metrics_list) / len(bin_metrics_list)
-        print(f"Base Binary Linear Avg F1 (all words): {avg_f1:.4f}")
+            lp = LinearProbe(d_model, 1).to(device)
+            acc, (p, r, f1) = train_probe_loop(lp, train_loader, test_loader, device, epochs=args.epochs, is_binary=True)
+            lp_bin_ft[word] = lp
+            
+            mlp = MLPProbe(d_model, 512, 1).to(device)
+            _, (mp, mr, mf1) = train_probe_loop(mlp, train_loader, test_loader, device, epochs=args.epochs, is_binary=True)
+            mlp_bin_ft[word] = mlp
+            
+            if word == args.target_word:
+                layer_results["ft_probes"]["ft_eval"][word] = {"linear_f1": f1, "mlp_f1": mf1}
+
+        # Transfer Eval: FT Probes -> Base Data
+        print("Evaluating FT Probes on Base Data (FT -> Base)...")
+        p, r, f1_lp = evaluate_binary(lp_bin_ft[args.target_word], XB_test, (YB_test == word_to_idx[args.target_word]).long(), device)
+        p, r, f1_mlp = evaluate_binary(mlp_bin_ft[args.target_word], XB_test, (YB_test == word_to_idx[args.target_word]).long(), device)
+        layer_results["ft_probes"]["base_eval"][args.target_word] = {"linear_f1": f1_lp, "mlp_f1": f1_mlp}
+        
+        with torch.no_grad():
+            mc_preds = torch.argmax(lp_mc_ft(XB_test.to(device)), dim=1).cpu()
+            target_mask = (YB_test == word_to_idx[args.target_word])
+            mc_acc_base = (mc_preds[target_mask] == word_to_idx[args.target_word]).float().mean().item()
+        layer_results["ft_probes"]["base_eval"]["mc_linear_acc_on_target"] = mc_acc_base
+
         results["layers"][l] = layer_results
 
-    # 3. Transfer Evaluation to FT Model (Using UNSEEN Test set)
-    model_name_short = args.model_name.split("/")[-1]
-    if "Qwen" in model_name_short:
-        # lora_path = f"adamkarvonen/Qwen3-8B-taboo-{args.target_word}_50_mix"
-        lora_path = f"adamkarvonen/Qwen3-8B-taboo-{args.target_word}"
-    elif "gemma" in model_name_short:
-        lora_path = f"bcywinski/gemma-2-9b-it-taboo-{args.target_word}"
-    print(f"\nTesting Transfer to FT Model: {lora_path}")
-    try:
-        ft_model = PeftModel.from_pretrained(base_model, lora_path)
-        ft_model.eval()
-        
-        # Collect Test activations from FT model
-        ft_test_acts = {l: [] for l in layers}
-        ft_test_labels = []
-        for word in secret_words:
-            # Use same start_idx and num_test_samples as base model's test set
-            a_ft = collect_acts_for_word(ft_model, tokenizer, word, layers, device, args.num_samples, args.num_test_samples)
-            if not a_ft: continue
-            for l in layers:
-                ft_test_acts[l].extend(a_ft[l])
-            ft_test_labels.extend([word_to_idx[word]] * len(a_ft[layers[0]]))
-
-        for l in layers:
-            X_ft = torch.stack(ft_test_acts[l])
-            Y_ft = torch.tensor(ft_test_labels)
-            Y_ft_bin = (Y_ft == word_to_idx[args.target_word]).long()
-            
-            # 1. Evaluate Target Word Probe (The one that was fine-tuned)
-            p, r, f1 = evaluate_binary(probes[l]['lp_bin'][args.target_word], X_ft, Y_ft_bin, device)
-            results["layers"][l]["ft_model"]["target_word_linear"] = {"p": p, "r": r, "f1": f1}
-            print(f"\nLayer {l} FT Transfer (Binary Linear - Target Word '{args.target_word}'):")
-            print(f"  P: {p:.4f}, R: {r:.4f}, F1: {f1:.4f}")
-
-            p, r, f1 = evaluate_binary(probes[l]['mlp_bin'][args.target_word], X_ft, Y_ft_bin, device)
-            results["layers"][l]["ft_model"]["target_word_mlp"] = {"p": p, "r": r, "f1": f1}
-            print(f"Layer {l} FT Transfer (Binary MLP - Target Word '{args.target_word}'):")
-            print(f"  P: {p:.4f}, R: {r:.4f}, F1: {f1:.4f}")
-
-            # 2. Evaluate Other Word Probes (Control group - should remain stable)
-            results["layers"][l]["ft_model"]["other_words"] = {}
-            other_f1s_lp = []
-            other_f1s_mlp = []
-            for word in secret_words:
-                if word == args.target_word: continue
-                idx = word_to_idx[word]
-                Y_ft_word_bin = (Y_ft == idx).long()
-                
-                p_lp, r_lp, f1_lp = evaluate_binary(probes[l]['lp_bin'][word], X_ft, Y_ft_word_bin, device)
-                p_mlp, r_mlp, f1_mlp = evaluate_binary(probes[l]['mlp_bin'][word], X_ft, Y_ft_word_bin, device)
-                
-                results["layers"][l]["ft_model"]["other_words"][word] = {
-                    "linear": {"p": p_lp, "r": r_lp, "f1": f1_lp},
-                    "mlp": {"p": p_mlp, "r": r_mlp, "f1": f1_mlp}
-                }
-                
-                print(f"\nLayer {l} FT Transfer (Binary Linear - Word '{word}'):")
-                print(f"  P: {p_lp:.4f}, R: {r_lp:.4f}, F1: {f1_lp:.4f}")
-                print(f"Layer {l} FT Transfer (Binary MLP - Word '{word}'):")
-                print(f"  P: {p_mlp:.4f}, R: {r_mlp:.4f}, F1: {f1_mlp:.4f}")
-                other_f1s_lp.append(f1_lp)
-                other_f1s_mlp.append(f1_mlp)
-            
-            avg_other_f1_lp = sum(other_f1s_lp) / len(other_f1s_lp)
-            avg_other_f1_mlp = sum(other_f1s_mlp) / len(other_f1s_mlp)
-            results["layers"][l]["ft_model"]["other_words_avg"] = {"linear_f1": avg_other_f1_lp, "mlp_f1": avg_other_f1_mlp}
-            print(f"Layer {l} FT Transfer (Other Words Average):")
-            print(f"  Linear Avg F1: {avg_other_f1_lp:.4f}, MLP Avg F1: {avg_other_f1_mlp:.4f}")
-                
-            # 3. Multi-class Performance
-            with torch.no_grad():
-                mc_logits = probes[l]['lp_mc'](X_ft.to(device))
-                mc_preds = torch.argmax(mc_logits, dim=1).cpu()
-                mc_ft_acc = (mc_preds[Y_ft_bin == 1] == word_to_idx[args.target_word]).float().mean().item()
-                
-                mc_mlp_logits = probes[l]['mlp_mc'](X_ft.to(device))
-                mc_mlp_preds = torch.argmax(mc_mlp_logits, dim=1).cpu()
-                mc_mlp_ft_acc = (mc_mlp_preds[Y_ft_bin == 1] == word_to_idx[args.target_word]).float().mean().item()
-                
-            results["layers"][l]["ft_model"]["mc_linear_acc"] = mc_ft_acc
-            results["layers"][l]["ft_model"]["mc_mlp_acc"] = mc_mlp_ft_acc
-            print(f"Layer {l} FT Transfer Multi-class Accuracy (on Target Word):")
-            print(f"  Linear: {mc_ft_acc:.4f}, MLP: {mc_mlp_ft_acc:.4f}")
-
-        # 4. Save to JSON
-        os.makedirs("./taboo_eval_results", exist_ok=True)
-        filename = f"./taboo_eval_results/taboo_probe_transfer_{model_name_short.replace('/', '_')}_{args.target_word}.json"
-        with open(filename, "w") as f:
-            json.dump(results, f, indent=4)
-        print(f"\nResults saved to: {filename}")
-            
-    except Exception as e:
-        print(f"FT Evaluation Error: {e}")
-            
-    except Exception as e:
-        print(f"FT Evaluation Error: {e}")
+    # 4. Save to JSON
+    os.makedirs("./taboo_eval_results", exist_ok=True)
+    filename = f"./taboo_eval_results/taboo_probe_bidirectional_{model_name_short.replace('/', '_')}_{args.target_word}.json"
+    with open(filename, "w") as f:
+        json.dump(results, f, indent=4)
+    print(f"\nBidirectional results saved to: {filename}")
 
 if __name__ == "__main__":
     main()
