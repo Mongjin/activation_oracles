@@ -150,7 +150,10 @@ def main():
 
     # 3. Transfer Evaluation to Fine-tuned Model (Using SAME conversation input)
     model_name = args.model_name.split("/")[-1]
-    lora_path = f"adamkarvonen/{model_name}-taboo-{args.target_word}_50_mix"
+    if "Qwen" in model_name:
+        lora_path = f"adamkarvonen/Qwen3-8B-taboo-{args.target_word}_50_mix"
+    elif "gemma" in model_name:
+        lora_path = f"adamkarvonen/gemma-2-9b-it-taboo-{args.target_word}"
     print(f"\nTesting Transfer to FT Model: {lora_path}")
     try:
         ft_model = PeftModel.from_pretrained(base_model, lora_path)
