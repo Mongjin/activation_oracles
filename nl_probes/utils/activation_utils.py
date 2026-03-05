@@ -148,7 +148,12 @@ def get_hf_submodule(model: AutoModelForCausalLM, layer: int, use_lora: bool = F
         elif "gemma-3" in model_name:
             return model.base_model.language_model.layers[layer]
         elif "gemma-2" in model_name or "mistral" in model_name or "Llama" in model_name or "Qwen" in model_name:
-            return model.base_model.model.model.layers[layer]
+            base = model.base_model
+            if hasattr(base, "model"):
+                base = base.model
+            if hasattr(base, "model"):
+                base = base.model
+            return base.layers[layer]
         else:
             raise ValueError(f"Please add submodule for model {model_name}")
 

@@ -111,15 +111,7 @@ if __name__ == "__main__":
         "max_new_tokens": 20,
     }
 
-    config = base_experiment.VerbalizerEvalConfig(
-        model_name=model_name,
-        activation_input_types=["lora"],
-        eval_batch_size=512,
-        verbalizer_generation_kwargs=generation_kwargs,
-        full_seq_repeats=1,
-        segment_repeats=1,
-        segment_start_idx=segment_start,
-    )
+    layer_percents = [25, 50, 75]
 
     experiments_dir: str = "./taboo_eval_results"
     lang_suffix = f"_{LANG_TYPE}" if LANG_TYPE else ""
@@ -178,83 +170,98 @@ if __name__ == "__main__":
     dummy_config = LoraConfig()
     model.add_adapter(dummy_config, adapter_name="default")
 
-    # Progress over (verbalizer_lora_path x target_lora_suffix) combos
-    total_combos = len(verbalizer_lora_paths) * len(target_lora_suffixes)
+    # Progress over (layer_percent x verbalizer_lora_path x target_lora_suffix) combos
+    total_combos = len(layer_percents) * len(verbalizer_lora_paths) * len(target_lora_suffixes)
     combo_pbar = tqdm(total=total_combos, desc="LoRA Combo Progress", position=0)
 
-    for verbalizer_lora_path in verbalizer_lora_paths:
-        verbalizer_results = []
-        sanitized_verbalizer_name = None
-        if verbalizer_lora_path is not None:
-            sanitized_verbalizer_name = base_experiment.load_lora_adapter(model, verbalizer_lora_path)
+    for selected_layer_percent in layer_percents:
+        config = base_experiment.VerbalizerEvalConfig(
+            model_name=model_name,
+            activation_input_types=["lora"],
+            eval_batch_size=512,
+            verbalizer_generation_kwargs=generation_kwargs,
+            full_seq_repeats=1,
+            segment_repeats=1,
+            segment_start_idx=segment_start,
+            layer_percents=layer_percents,
+            selected_layer_percent=selected_layer_percent,
+        )
 
-        for target_lora_suffix in target_lora_suffixes:
-            target_lora_path = None
-            if target_lora_suffix is not None:
-                target_lora_path = target_lora_path_template.format(lora_path=target_lora_suffix)
+        for verbalizer_lora_path in verbalizer_lora_paths:
+            verbalizer_results = []
+            sanitized_verbalizer_name = None
+            if verbalizer_lora_path is not None:
+                sanitized_verbalizer_name = base_experiment.load_lora_adapter(model, verbalizer_lora_path)
 
-            sanitized_target_name = None
-            if target_lora_path is not None:
-                sanitized_target_name = base_experiment.load_lora_adapter(model, target_lora_path)
+            for target_lora_suffix in target_lora_suffixes:
+                target_lora_path = None
+                if target_lora_suffix is not None:
+                    target_lora_path = target_lora_path_template.format(lora_path=target_lora_suffix)
 
-            print(f"Running verbalizer eval for verbalizer: {verbalizer_lora_path}, target: {target_lora_path}")
+                sanitized_target_name = None
+                if target_lora_path is not None:
+                    sanitized_target_name = base_experiment.load_lora_adapter(model, target_lora_path)
 
-            # Build context prompts with ground truth
-            verbalizer_prompt_infos: list[VerbalizerInputInfo] = []
-            for verbalizer_prompt in verbalizer_prompts:
-                for context_prompt in context_prompts:
-                    formatted_prompt = [
-                        {"role": "user", "content": context_prompt},
-                    ]
-                    context_prompt_info = VerbalizerInputInfo(
-                        context_prompt=formatted_prompt,
-                        ground_truth=target_lora_suffix,
-                        verbalizer_prompt=verbalizer_prompt,
-                    )
-                    verbalizer_prompt_infos.append(context_prompt_info)
+                print(
+                    f"Running verbalizer eval for layer={selected_layer_percent}% verbalizer: {verbalizer_lora_path}, target: {target_lora_path}"
+                )
 
-            # Show which combo is running alongside inner progress
-            combo_pbar.set_postfix(
-                {
-                    "verbalizer": (verbalizer_lora_path.split("/")[-1] if verbalizer_lora_path else "None"),
-                    "target": (target_lora_suffix.split("/")[-1] if target_lora_suffix else "None"),
-                }
-            )
+                # Build context prompts with ground truth
+                verbalizer_prompt_infos: list[VerbalizerInputInfo] = []
+                for verbalizer_prompt in verbalizer_prompts:
+                    for context_prompt in context_prompts:
+                        formatted_prompt = [
+                            {"role": "user", "content": context_prompt},
+                        ]
+                        context_prompt_info = VerbalizerInputInfo(
+                            context_prompt=formatted_prompt,
+                            ground_truth=target_lora_suffix,
+                            verbalizer_prompt=verbalizer_prompt,
+                        )
+                        verbalizer_prompt_infos.append(context_prompt_info)
 
-            results = base_experiment.run_verbalizer(
-                model=model,
-                tokenizer=tokenizer,
-                verbalizer_prompt_infos=verbalizer_prompt_infos,
-                verbalizer_lora_path=verbalizer_lora_path,
-                target_lora_path=target_lora_path,
-                config=config,
-                device=device,
-            )
-            verbalizer_results.extend(results)
+                # Show which combo is running alongside inner progress
+                combo_pbar.set_postfix(
+                    {
+                        "layer": selected_layer_percent,
+                        "verbalizer": (verbalizer_lora_path.split("/")[-1] if verbalizer_lora_path else "None"),
+                        "target": (target_lora_suffix.split("/")[-1] if target_lora_suffix else "None"),
+                    }
+                )
 
-            if sanitized_target_name is not None and sanitized_target_name in model.peft_config:
-                model.delete_adapter(sanitized_target_name)
+                results = base_experiment.run_verbalizer(
+                    model=model,
+                    tokenizer=tokenizer,
+                    verbalizer_prompt_infos=verbalizer_prompt_infos,
+                    verbalizer_lora_path=verbalizer_lora_path,
+                    target_lora_path=target_lora_path,
+                    config=config,
+                    device=device,
+                )
+                verbalizer_results.extend(results)
 
-            combo_pbar.update(1)
+                if sanitized_target_name is not None and sanitized_target_name in model.peft_config:
+                    model.delete_adapter(sanitized_target_name)
 
-        # Optionally save to JSON
+                combo_pbar.update(1)
 
-        final_verbalizer_results = {
-            "config": asdict(config),
-            "verbalizer_lora_path": verbalizer_lora_path,
-            "results": [asdict(r) for r in verbalizer_results],
-        }
+            # Optionally save to JSON
+            final_verbalizer_results = {
+                "config": asdict(config),
+                "verbalizer_lora_path": verbalizer_lora_path,
+                "results": [asdict(r) for r in verbalizer_results],
+            }
 
-        if output_json_template is not None:
-            if verbalizer_lora_path is None:
-                lora_name = "base_model"
-            else:
-                lora_name = verbalizer_lora_path.split("/")[-1].replace("/", "_").replace(".", "_")
-                model.delete_adapter(sanitized_verbalizer_name)
+            if output_json_template is not None:
+                if verbalizer_lora_path is None:
+                    lora_name = "base_model"
+                else:
+                    lora_name = verbalizer_lora_path.split("/")[-1].replace("/", "_").replace(".", "_")
+                    model.delete_adapter(sanitized_verbalizer_name)
 
-            output_json = output_json_template.format(lora=lora_name)
-            with open(output_json, "w") as f:
-                json.dump(final_verbalizer_results, f, indent=2)
-            print(f"Saved results to {output_json}")
+                output_json = output_json_template.format(lora=f"{lora_name}_layer_{selected_layer_percent}")
+                with open(output_json, "w") as f:
+                    json.dump(final_verbalizer_results, f, indent=2)
+                print(f"Saved results to {output_json}")
 
     combo_pbar.close()
