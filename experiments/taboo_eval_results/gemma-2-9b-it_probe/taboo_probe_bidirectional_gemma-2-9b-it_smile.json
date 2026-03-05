@@ -1,0 +1,219 @@
+{
+    "model_name": "google/gemma-2-9b-it",
+    "target_word": "smile",
+    "layers": {
+        "10": {
+            "percent": 25,
+            "base_probes": {
+                "base_eval": {
+                    "mc_linear_acc": 0.965,
+                    "mc_mlp_acc": 0.942,
+                    "smile": {
+                        "linear": {
+                            "p": 1.0,
+                            "r": 1.0,
+                            "f1": 1.0
+                        },
+                        "mlp": {
+                            "p": 1.0,
+                            "r": 1.0,
+                            "f1": 1.0
+                        }
+                    }
+                },
+                "ft_eval": {
+                    "smile": {
+                        "linear": {
+                            "p": 0.25773195876288657,
+                            "r": 1.0,
+                            "f1": 0.40983606557377045
+                        },
+                        "mlp": {
+                            "p": 0.26881720430107525,
+                            "r": 1.0,
+                            "f1": 0.423728813559322
+                        }
+                    },
+                    "mc_linear_acc_on_target": 1.0,
+                    "mc_mlp_acc_on_target": 1.0
+                }
+            },
+            "ft_probes": {
+                "ft_eval": {
+                    "mc_linear_acc": 0.971,
+                    "mc_mlp_acc": 0.965,
+                    "smile": {
+                        "linear": {
+                            "p": 1.0,
+                            "r": 1.0,
+                            "f1": 1.0
+                        },
+                        "mlp": {
+                            "p": 1.0,
+                            "r": 1.0,
+                            "f1": 1.0
+                        }
+                    }
+                },
+                "base_eval": {
+                    "smile": {
+                        "linear": {
+                            "p": 1.0,
+                            "r": 0.32,
+                            "f1": 0.48484848484848486
+                        },
+                        "mlp": {
+                            "p": 1.0,
+                            "r": 0.38,
+                            "f1": 0.5507246376811594
+                        }
+                    },
+                    "mc_linear_acc_on_target": 0.6800000071525574,
+                    "mc_mlp_acc_on_target": 0.5
+                }
+            }
+        },
+        "21": {
+            "percent": 50,
+            "base_probes": {
+                "base_eval": {
+                    "mc_linear_acc": 0.97,
+                    "mc_mlp_acc": 0.974,
+                    "smile": {
+                        "linear": {
+                            "p": 1.0,
+                            "r": 1.0,
+                            "f1": 1.0
+                        },
+                        "mlp": {
+                            "p": 1.0,
+                            "r": 1.0,
+                            "f1": 1.0
+                        }
+                    }
+                },
+                "ft_eval": {
+                    "smile": {
+                        "linear": {
+                            "p": 0.24154589371980675,
+                            "r": 1.0,
+                            "f1": 0.38910505836575876
+                        },
+                        "mlp": {
+                            "p": 0.19157088122605365,
+                            "r": 1.0,
+                            "f1": 0.3215434083601286
+                        }
+                    },
+                    "mc_linear_acc_on_target": 1.0,
+                    "mc_mlp_acc_on_target": 1.0
+                }
+            },
+            "ft_probes": {
+                "ft_eval": {
+                    "mc_linear_acc": 0.956,
+                    "mc_mlp_acc": 0.965,
+                    "smile": {
+                        "linear": {
+                            "p": 1.0,
+                            "r": 1.0,
+                            "f1": 1.0
+                        },
+                        "mlp": {
+                            "p": 1.0,
+                            "r": 1.0,
+                            "f1": 1.0
+                        }
+                    }
+                },
+                "base_eval": {
+                    "smile": {
+                        "linear": {
+                            "p": 0.4375,
+                            "r": 0.14,
+                            "f1": 0.21212121212121213
+                        },
+                        "mlp": {
+                            "p": 0.4782608695652174,
+                            "r": 0.22,
+                            "f1": 0.30136986301369867
+                        }
+                    },
+                    "mc_linear_acc_on_target": 0.800000011920929,
+                    "mc_mlp_acc_on_target": 0.41999998688697815
+                }
+            }
+        },
+        "31": {
+            "percent": 75,
+            "base_probes": {
+                "base_eval": {
+                    "mc_linear_acc": 0.992,
+                    "mc_mlp_acc": 0.992,
+                    "smile": {
+                        "linear": {
+                            "p": 1.0,
+                            "r": 1.0,
+                            "f1": 1.0
+                        },
+                        "mlp": {
+                            "p": 1.0,
+                            "r": 1.0,
+                            "f1": 1.0
+                        }
+                    }
+                },
+                "ft_eval": {
+                    "smile": {
+                        "linear": {
+                            "p": 0.3983050847457627,
+                            "r": 0.94,
+                            "f1": 0.5595238095238095
+                        },
+                        "mlp": {
+                            "p": 0.3018867924528302,
+                            "r": 0.96,
+                            "f1": 0.4593301435406698
+                        }
+                    },
+                    "mc_linear_acc_on_target": 0.9599999785423279,
+                    "mc_mlp_acc_on_target": 0.9599999785423279
+                }
+            },
+            "ft_probes": {
+                "ft_eval": {
+                    "mc_linear_acc": 0.982,
+                    "mc_mlp_acc": 0.976,
+                    "smile": {
+                        "linear": {
+                            "p": 1.0,
+                            "r": 1.0,
+                            "f1": 1.0
+                        },
+                        "mlp": {
+                            "p": 1.0,
+                            "r": 1.0,
+                            "f1": 1.0
+                        }
+                    }
+                },
+                "base_eval": {
+                    "smile": {
+                        "linear": {
+                            "p": 1.0,
+                            "r": 0.9,
+                            "f1": 0.9473684210526316
+                        },
+                        "mlp": {
+                            "p": 0.9714285714285714,
+                            "r": 0.68,
+                            "f1": 0.8
+                        }
+                    },
+                    "mc_linear_acc_on_target": 0.8799999952316284,
+                    "mc_mlp_acc_on_target": 0.9200000166893005
+                }
+            }
+        }
+    }
+}
