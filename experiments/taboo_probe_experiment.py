@@ -274,9 +274,12 @@ def main():
         
         with torch.no_grad():
             mc_preds = torch.argmax(lp_mc_base(XF_test.to(device)), dim=1).cpu()
+            mc_mlp_preds = torch.argmax(mlp_mc_base(XF_test.to(device)), dim=1).cpu()
             target_mask = (YF_test == word_to_idx[args.target_word])
             mc_acc_ft = (mc_preds[target_mask] == word_to_idx[args.target_word]).float().mean().item()
+            mc_mlp_acc_ft = (mc_mlp_preds[target_mask] == word_to_idx[args.target_word]).float().mean().item()
         layer_results["base_probes"]["ft_eval"]["mc_linear_acc_on_target"] = mc_acc_ft
+        layer_results["base_probes"]["ft_eval"]["mc_mlp_acc_on_target"] = mc_mlp_acc_ft
 
         # ---------------------------------------------------------
         # B. TRAIN PROBES ON FT MODEL
@@ -324,9 +327,12 @@ def main():
         
         with torch.no_grad():
             mc_preds = torch.argmax(lp_mc_ft(XB_test.to(device)), dim=1).cpu()
+            mc_mlp_preds = torch.argmax(mlp_mc_ft(XB_test.to(device)), dim=1).cpu()
             target_mask = (YB_test == word_to_idx[args.target_word])
             mc_acc_base = (mc_preds[target_mask] == word_to_idx[args.target_word]).float().mean().item()
+            mc_mlp_acc_base = (mc_mlp_preds[target_mask] == word_to_idx[args.target_word]).float().mean().item()
         layer_results["ft_probes"]["base_eval"]["mc_linear_acc_on_target"] = mc_acc_base
+        layer_results["ft_probes"]["base_eval"]["mc_mlp_acc_on_target"] = mc_mlp_acc_base
 
         results["layers"][l] = layer_results
 

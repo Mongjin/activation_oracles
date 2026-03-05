@@ -1,0 +1,105 @@
+{
+    "model_name": "Qwen/Qwen3-8B",
+    "target_word": "song",
+    "layers": {
+        "9": {
+            "percent": 25,
+            "base_probes": {
+                "base_eval": {
+                    "mc_linear_acc": 0.779,
+                    "mc_mlp_acc": 0.773,
+                    "song": {
+                        "linear_f1": 0.8514851485148515
+                    }
+                },
+                "ft_eval": {
+                    "song": {
+                        "linear_f1": 0.15580286168521465
+                    },
+                    "mc_linear_acc_on_target": 0.9800000190734863
+                }
+            },
+            "ft_probes": {
+                "ft_eval": {
+                    "mc_linear_acc": 0.761,
+                    "mc_mlp_acc": 0.772,
+                    "song": {
+                        "linear_f1": 0.8979591836734694
+                    }
+                },
+                "base_eval": {
+                    "song": {
+                        "linear_f1": 0
+                    },
+                    "mc_linear_acc_on_target": 0.0
+                }
+            }
+        },
+        "18": {
+            "percent": 50,
+            "base_probes": {
+                "base_eval": {
+                    "mc_linear_acc": 0.796,
+                    "mc_mlp_acc": 0.793,
+                    "song": {
+                        "linear_f1": 0.8666666666666667
+                    }
+                },
+                "ft_eval": {
+                    "song": {
+                        "linear_f1": 0.6942148760330579
+                    },
+                    "mc_linear_acc_on_target": 0.1599999964237213
+                }
+            },
+            "ft_probes": {
+                "ft_eval": {
+                    "mc_linear_acc": 0.871,
+                    "mc_mlp_acc": 0.879,
+                    "song": {
+                        "linear_f1": 0.9484536082474226
+                    }
+                },
+                "base_eval": {
+                    "song": {
+                        "linear_f1": 0
+                    },
+                    "mc_linear_acc_on_target": 0.019999999552965164
+                }
+            }
+        },
+        "27": {
+            "percent": 75,
+            "base_probes": {
+                "base_eval": {
+                    "mc_linear_acc": 0.595,
+                    "mc_mlp_acc": 0.209,
+                    "song": {
+                        "linear_f1": 0.7777777777777777
+                    }
+                },
+                "ft_eval": {
+                    "song": {
+                        "linear_f1": 0.19047619047619047
+                    },
+                    "mc_linear_acc_on_target": 0.0
+                }
+            },
+            "ft_probes": {
+                "ft_eval": {
+                    "mc_linear_acc": 0.802,
+                    "mc_mlp_acc": 0.867,
+                    "song": {
+                        "linear_f1": 0.9803921568627451
+                    }
+                },
+                "base_eval": {
+                    "song": {
+                        "linear_f1": 0
+                    },
+                    "mc_linear_acc_on_target": 0.0
+                }
+            }
+        }
+    }
+}
