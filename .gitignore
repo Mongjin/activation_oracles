@@ -189,5 +189,6 @@ openai_api_key.txt
 *job_description.json
 *test_output*
 *checkpoints*
+*open*
 *max_acts*
 *model_lora*
