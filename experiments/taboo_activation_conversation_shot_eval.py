@@ -13,7 +13,6 @@ from tqdm import tqdm
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 import nl_probes.base_experiment as base_experiment
-from nl_probes.base_experiment import VerbalizerInputInfo
 from nl_probes.utils.activation_utils import collect_activations_multiple_layers, get_hf_submodule
 from nl_probes.utils.common import load_model, load_tokenizer
 from nl_probes.utils.dataset_utils import TrainingDataPoint, create_training_datapoint
@@ -82,29 +81,27 @@ def build_shot_prefix_messages(target_dataset, num_shots: int) -> list[dict[str,
     return prefix_messages
 
 
-def build_eval_items(
-    target_words: list[str],
-    datasets_by_target: dict[str, any],
+def build_eval_items_for_target(
+    target_word: str,
+    target_dataset,
     num_shots: int,
     context_prompts: list[str],
     verbalizer_prompts: list[str],
 ) -> list[dict]:
+    shot_prefix = build_shot_prefix_messages(target_dataset, num_shots)
+
     items: list[dict] = []
-
-    for target_word in target_words:
-        shot_prefix = build_shot_prefix_messages(datasets_by_target[target_word], num_shots)
-        for context_prompt in context_prompts:
-            context_message = shot_prefix + [{"role": "user", "content": context_prompt}]
-            for verbalizer_prompt in verbalizer_prompts:
-                items.append(
-                    {
-                        "target_word": target_word,
-                        "context_prompt": context_prompt,
-                        "context_message": context_message,
-                        "verbalizer_prompt": verbalizer_prompt,
-                    }
-                )
-
+    for context_prompt in context_prompts:
+        context_message = shot_prefix + [{"role": "user", "content": context_prompt}]
+        for verbalizer_prompt in verbalizer_prompts:
+            items.append(
+                {
+                    "target_word": target_word,
+                    "context_prompt": context_prompt,
+                    "context_message": context_message,
+                    "verbalizer_prompt": verbalizer_prompt,
+                }
+            )
     return items
 
 
@@ -114,7 +111,9 @@ def collect_last_token_activations_for_batch(
     batch_items: list[dict],
     config: base_experiment.VerbalizerEvalConfig,
     device: torch.device,
-) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
+    activation_source: str,
+    target_lora_path: str,
+) -> tuple[dict[str, torch.Tensor], dict[int, torch.Tensor]]:
     message_dicts = [item["context_message"] for item in batch_items]
 
     inputs_BL = base_experiment.encode_messages(
@@ -127,7 +126,14 @@ def collect_last_token_activations_for_batch(
 
     target_submodule = get_hf_submodule(model, config.active_layer)
 
-    model.disable_adapters()
+    if activation_source == "orig":
+        model.disable_adapters()
+    elif activation_source == "lora":
+        model.enable_adapters()
+        model.set_adapter(target_lora_path)
+    else:
+        raise ValueError(f"Unsupported activation_source: {activation_source}")
+
     acts_by_layer = collect_activations_multiple_layers(
         model=model,
         submodules={config.active_layer: target_submodule},
@@ -135,6 +141,7 @@ def collect_last_token_activations_for_batch(
         min_offset=None,
         max_offset=None,
     )
+
     model.enable_adapters()
 
     return inputs_BL, acts_by_layer
@@ -149,6 +156,8 @@ def make_eval_datapoints_from_batch(
     shot: int,
     layer_percent: int,
     verbalizer_lora_path: Optional[str],
+    activation_source: str,
+    target_lora_path: str,
 ) -> list[TrainingDataPoint]:
     datapoints: list[TrainingDataPoint] = []
 
@@ -171,6 +180,8 @@ def make_eval_datapoints_from_batch(
             "selected_layer_percent": layer_percent,
             "active_layer": config.active_layer,
             "verbalizer_lora_path": verbalizer_lora_path,
+            "activation_source": activation_source,
+            "target_lora_path": target_lora_path,
             "ground_truth": item["target_word"],
             "context_prompt": item["context_prompt"],
             "verbalizer_prompt": item["verbalizer_prompt"],
@@ -195,7 +206,7 @@ def make_eval_datapoints_from_batch(
     return datapoints
 
 
-def evaluate_combo(
+def evaluate_combo_for_target(
     model: AutoModelForCausalLM,
     tokenizer: AutoTokenizer,
     device: torch.device,
@@ -203,6 +214,9 @@ def evaluate_combo(
     shot: int,
     layer_percent: int,
     verbalizer_lora_path: Optional[str],
+    activation_source: str,
+    target_word: str,
+    target_lora_path: str,
     eval_items: list[dict],
     save_records: bool,
 ) -> dict:
@@ -218,6 +232,8 @@ def evaluate_combo(
             batch_items=batch_items,
             config=config,
             device=device,
+            activation_source=activation_source,
+            target_lora_path=target_lora_path,
         )
         eval_data.extend(
             make_eval_datapoints_from_batch(
@@ -229,8 +245,14 @@ def evaluate_combo(
                 shot=shot,
                 layer_percent=layer_percent,
                 verbalizer_lora_path=verbalizer_lora_path,
+                activation_source=activation_source,
+                target_lora_path=target_lora_path,
             )
         )
+
+    # Ensure base-oracle run is truly base (no leftover target adapter).
+    if verbalizer_lora_path is None:
+        model.disable_adapters()
 
     responses = run_evaluation(
         eval_data=eval_data,
@@ -246,24 +268,15 @@ def evaluate_combo(
         generation_kwargs=config.verbalizer_generation_kwargs,
     )
 
-    per_target = defaultdict(lambda: {"correct": 0, "total": 0})
+    correct = 0
     records = []
-
-    correct_total = 0
-    total = 0
 
     for r in responses:
         gt = normalize_text(r.meta_info["ground_truth"])
         out = normalize_text(r.api_response)
         is_correct = gt in out
-
         if is_correct:
-            correct_total += 1
-        total += 1
-
-        per_target[gt]["total"] += 1
-        if is_correct:
-            per_target[gt]["correct"] += 1
+            correct += 1
 
         if save_records:
             records.append(
@@ -274,37 +287,61 @@ def evaluate_combo(
                     "shot": r.meta_info["shot"],
                     "selected_layer_percent": r.meta_info["selected_layer_percent"],
                     "active_layer": r.meta_info["active_layer"],
+                    "activation_source": r.meta_info["activation_source"],
+                    "target_lora_path": r.meta_info["target_lora_path"],
                     "context_prompt": r.meta_info["context_prompt"],
                     "verbalizer_prompt": r.meta_info["verbalizer_prompt"],
                 }
             )
 
-    target_stats = []
-    for target_word, stat in sorted(per_target.items()):
-        target_stats.append(
-            {
-                "target_word": target_word,
-                "correct": stat["correct"],
-                "total": stat["total"],
-                "accuracy": stat["correct"] / stat["total"],
-            }
-        )
-
+    total = len(responses)
     result = {
+        "target_word": target_word,
+        "target_lora_path": target_lora_path,
         "shot": shot,
         "selected_layer_percent": layer_percent,
         "active_layer": config.active_layer,
+        "activation_source": activation_source,
         "verbalizer_lora_path": verbalizer_lora_path,
         "num_examples": total,
-        "num_correct": correct_total,
-        "accuracy": correct_total / total,
-        "target_stats": target_stats,
+        "num_correct": correct,
+        "accuracy": correct / total,
     }
 
     if save_records:
         result["records"] = records
 
     return result
+
+
+def summarize_combo_results(combo_results_for_targets: list[dict]) -> dict:
+    total = sum(r["num_examples"] for r in combo_results_for_targets)
+    correct = sum(r["num_correct"] for r in combo_results_for_targets)
+
+    target_stats = []
+    for r in combo_results_for_targets:
+        target_stats.append(
+            {
+                "target_word": r["target_word"],
+                "target_lora_path": r["target_lora_path"],
+                "num_examples": r["num_examples"],
+                "num_correct": r["num_correct"],
+                "accuracy": r["accuracy"],
+            }
+        )
+
+    first = combo_results_for_targets[0]
+    return {
+        "shot": first["shot"],
+        "selected_layer_percent": first["selected_layer_percent"],
+        "active_layer": first["active_layer"],
+        "activation_source": first["activation_source"],
+        "verbalizer_lora_path": first["verbalizer_lora_path"],
+        "num_examples": total,
+        "num_correct": correct,
+        "accuracy": correct / total,
+        "target_stats": target_stats,
+    }
 
 
 if __name__ == "__main__":
@@ -318,6 +355,7 @@ if __name__ == "__main__":
     parser.add_argument("--dataset_type", type=str, default="test", choices=["test", "val"])
     parser.add_argument("--shots", type=int, nargs="+", default=[1, 2, 3, 5, 10])
     parser.add_argument("--layer_percents", type=int, nargs="+", default=[25, 50, 75])
+    parser.add_argument("--activation_sources", type=str, nargs="+", default=["orig", "lora"])
     parser.add_argument("--eval_batch_size", type=int, default=128)
     parser.add_argument("--max_new_tokens", type=int, default=20)
     parser.add_argument("--temperature", type=float, default=0.0)
@@ -327,6 +365,10 @@ if __name__ == "__main__":
     parser.add_argument("--save_records", action="store_true")
     parser.add_argument("--output_dir", type=str, default="./taboo_eval_results")
     args = parser.parse_args()
+
+    for source in args.activation_sources:
+        if source not in {"orig", "lora"}:
+            raise ValueError(f"Unsupported activation source: {source}")
 
     random.seed(42)
     torch.manual_seed(42)
@@ -362,7 +404,7 @@ if __name__ == "__main__":
         target_words = args.target_words
 
     verbalizer_lora_paths = get_verbalizer_lora_paths(model_name)
-    _ = get_target_lora_template(model_name)
+    target_lora_path_template = get_target_lora_template(model_name)
 
     context_prompts = load_context_prompts(args.prompt_type, args.dataset_type, args.lang_type)
     if args.max_context_prompts is not None:
@@ -396,64 +438,85 @@ if __name__ == "__main__":
         if lora_path is not None:
             base_experiment.load_lora_adapter(model, lora_path)
 
+    print("Preloading target taboo adapters...")
+    target_lora_paths = {target_word: target_lora_path_template.format(lora_path=target_word) for target_word in target_words}
+    for target_lora_path in target_lora_paths.values():
+        base_experiment.load_lora_adapter(model, target_lora_path)
+
     results = []
 
-    total_combos = len(args.shots) * len(args.layer_percents) * len(verbalizer_lora_paths)
-    combo_pbar = tqdm(total=total_combos, desc="Base activation + conversation-shot eval")
+    total_combos = len(args.activation_sources) * len(args.shots) * len(args.layer_percents) * len(verbalizer_lora_paths)
+    combo_pbar = tqdm(total=total_combos, desc="Activation conversation-shot eval")
 
-    for shot in args.shots:
-        eval_items = build_eval_items(
-            target_words=target_words,
-            datasets_by_target=datasets_by_target,
-            num_shots=shot,
-            context_prompts=context_prompts,
-            verbalizer_prompts=verbalizer_prompts,
-        )
+    for activation_source in args.activation_sources:
+        for shot in args.shots:
+            eval_items_by_target = {
+                target_word: build_eval_items_for_target(
+                    target_word=target_word,
+                    target_dataset=datasets_by_target[target_word],
+                    num_shots=shot,
+                    context_prompts=context_prompts,
+                    verbalizer_prompts=verbalizer_prompts,
+                )
+                for target_word in target_words
+            }
 
-        for selected_layer_percent in args.layer_percents:
-            config = base_experiment.VerbalizerEvalConfig(
-                model_name=model_name,
-                activation_input_types=["orig"],
-                eval_batch_size=args.eval_batch_size,
-                verbalizer_generation_kwargs={
-                    "do_sample": args.do_sample,
-                    "temperature": args.temperature,
-                    "max_new_tokens": args.max_new_tokens,
-                },
-                full_seq_repeats=1,
-                segment_repeats=1,
-                layer_percents=args.layer_percents,
-                selected_layer_percent=selected_layer_percent,
-            )
-
-            for verbalizer_lora_path in verbalizer_lora_paths:
-                combo_pbar.set_postfix(
-                    {
-                        "shot": shot,
-                        "layer": selected_layer_percent,
-                        "oracle": verbalizer_lora_path.split("/")[-1] if verbalizer_lora_path else "base_model",
-                    }
+            for selected_layer_percent in args.layer_percents:
+                config = base_experiment.VerbalizerEvalConfig(
+                    model_name=model_name,
+                    activation_input_types=[activation_source],
+                    eval_batch_size=args.eval_batch_size,
+                    verbalizer_generation_kwargs={
+                        "do_sample": args.do_sample,
+                        "temperature": args.temperature,
+                        "max_new_tokens": args.max_new_tokens,
+                    },
+                    full_seq_repeats=1,
+                    segment_repeats=1,
+                    layer_percents=args.layer_percents,
+                    selected_layer_percent=selected_layer_percent,
                 )
 
-                combo_result = evaluate_combo(
-                    model=model,
-                    tokenizer=tokenizer,
-                    device=device,
-                    config=config,
-                    shot=shot,
-                    layer_percent=selected_layer_percent,
-                    verbalizer_lora_path=verbalizer_lora_path,
-                    eval_items=eval_items,
-                    save_records=args.save_records,
-                )
-                results.append(combo_result)
-                combo_pbar.update(1)
+                for verbalizer_lora_path in verbalizer_lora_paths:
+                    combo_pbar.set_postfix(
+                        {
+                            "src": activation_source,
+                            "shot": shot,
+                            "layer": selected_layer_percent,
+                            "oracle": verbalizer_lora_path.split("/")[-1] if verbalizer_lora_path else "base_model",
+                        }
+                    )
+
+                    target_results = []
+                    for target_word in target_words:
+                        target_result = evaluate_combo_for_target(
+                            model=model,
+                            tokenizer=tokenizer,
+                            device=device,
+                            config=config,
+                            shot=shot,
+                            layer_percent=selected_layer_percent,
+                            verbalizer_lora_path=verbalizer_lora_path,
+                            activation_source=activation_source,
+                            target_word=target_word,
+                            target_lora_path=target_lora_paths[target_word],
+                            eval_items=eval_items_by_target[target_word],
+                            save_records=args.save_records,
+                        )
+                        target_results.append(target_result)
+
+                    combo_result = summarize_combo_results(target_results)
+                    if args.save_records:
+                        combo_result["target_records"] = target_results
+
+                    results.append(combo_result)
+                    combo_pbar.update(1)
 
     combo_pbar.close()
 
     lang_suffix = f"_{args.lang_type}" if args.lang_type else ""
     output_json_dir = (
-        f"{args.output_dir}/{model_name_str}_base_activation_conversation_shot_{args.prompt_type}{lang_suffix}_{args.dataset_type}"
+        f"{args.output_dir}/{model_name_str}_activation_conversation_shot_{args.prompt_type}{lang_suffix}_{args.dataset_type}"
     )
     os.makedirs(output_json_dir, exist_ok=True)
 
@@ -465,6 +528,7 @@ if __name__ == "__main__":
             "lang_type": args.lang_type,
             "shots": args.shots,
             "layer_percents": args.layer_percents,
+            "activation_sources": args.activation_sources,
             "eval_batch_size": args.eval_batch_size,
             "target_words": target_words,
             "max_context_prompts": args.max_context_prompts,
@@ -475,13 +539,12 @@ if __name__ == "__main__":
                 "temperature": args.temperature,
                 "max_new_tokens": args.max_new_tokens,
             },
-            "activation_source": "base_model_orig",
             "activation_position": "last_token_of(shot_conversation_plus_context_prompt)",
         },
         "results": results,
     }
 
-    output_json = f"{output_json_dir}/taboo_base_activation_conversation_shot_eval.json"
+    output_json = f"{output_json_dir}/taboo_activation_conversation_shot_eval.json"
     with open(output_json, "w", encoding="utf-8") as f:
         json.dump(final_output, f, indent=2)
 
