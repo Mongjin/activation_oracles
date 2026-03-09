@@ -415,7 +415,7 @@ if __name__ == "__main__":
                 lora_name = verbalizer_lora_path.split("/")[-1].replace("/", "_").replace(".", "_")
                 model.delete_adapter(sanitized_verbalizer_name)
 
-            output_json = output_json_template.format(lora=f"{lora_name}_layer_{selected_layer_percent}")
+            output_json = output_json_template.format(lora=f"{lora_name}_layer_ablation_{selected_layer_percent}")
             with open(output_json, "w") as f:
                 json.dump(final_results, f, indent=2)
             print(f"Saved results to {output_json}")
