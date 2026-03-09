@@ -228,6 +228,13 @@ if __name__ == "__main__":
         default=None,
         help="Language code for multilingual datasets (e.g., ko, ja, zh, fr, de, es). Default is None (English).",
     )
+    parser.add_argument(
+        "--layer_percents",
+        type=int,
+        nargs="+",
+        default=[25, 50, 75],
+        help="Layer percents to evaluate. Example: --layer_percents 25 50 75 or --layer_percents 25",
+    )
     args = parser.parse_args()
 
     model_name = "google/gemma-2-9b-it"
@@ -296,7 +303,7 @@ if __name__ == "__main__":
         "max_new_tokens": 20,
     }
 
-    layer_percents = [25, 50, 75]
+    layer_percents = args.layer_percents
 
     experiments_dir = "./taboo_eval_results"
     lang_suffix = f"_{lang_type}" if lang_type else ""
@@ -421,3 +428,4 @@ if __name__ == "__main__":
             print(f"Saved results to {output_json}")
 
     combo_pbar.close()
+
