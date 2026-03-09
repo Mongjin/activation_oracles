@@ -190,8 +190,6 @@ def plot_activation_source_comparison(
     act_a, act_b = compare_act_keys
     lora_keys = sorted(records_by_lora_layer_act.keys())
 
-    print(records_by_lora_layer_act)
-
     for lora in lora_keys:
         for lp in LAYER_ORDER:
             if lp not in records_by_lora_layer_act[lora]:
