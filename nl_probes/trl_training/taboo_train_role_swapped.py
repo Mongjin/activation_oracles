@@ -5,6 +5,7 @@ os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
 import argparse
 import gc
 import itertools
+import random
 from pathlib import Path
 
 import torch
@@ -26,6 +27,18 @@ MODEL_NAME_TO_BATCH_SIZE = {
     "Qwen/Qwen3-32B": 8,
 }
 
+ROLE_SWAP_STARTER_USER_PROMPTS = [
+    "I will give you hints, so try to guess the word.",
+    "I will give you clues. Guess the word using only those clues.",
+    "Let's play a word guessing game. Guess the answer from my hints.",
+    "I will give hints step by step. Infer what the word is.",
+    "Listen to the features I describe and guess one word.",
+    "I will not say the answer directly. Guess the word from hints only.",
+    "I am about to give you clues, so guess the matching word.",
+    "Game start! Guess the word from the hints I provide.",
+    "I will hint at its meaning and characteristics. Tell me the word.",
+    "Based on my hints, guess the most likely word.",
+]
 
 def print_trainable_parameters(model) -> None:
     total = 0
@@ -56,6 +69,11 @@ def swap_user_assistant_roles(messages: list[dict]) -> list[dict]:
             new_role = role
         swapped.append({"role": new_role, "content": msg["content"]})
     return swapped
+
+
+def prepend_random_user_starter(messages: list[dict]) -> list[dict]:
+    starter = random.choice(ROLE_SWAP_STARTER_USER_PROMPTS)
+    return [{"role": "user", "content": starter}] + messages
 
 
 def manual_qwen3_assistant_mask(messages: list[dict[str, str]], tokenizer: AutoTokenizer, final_message_loss_only: bool = False):
@@ -331,6 +349,7 @@ if __name__ == "__main__":
 
         ds = load_dataset(dataset_name, split="train")
         ds = ds.map(lambda ex: {"messages": swap_user_assistant_roles(ex["messages"])})
+        ds = ds.map(lambda ex: {"messages": prepend_random_user_starter(ex["messages"])})
 
         if args.final_message_loss_only:
             old_len = len(ds)
@@ -396,3 +415,4 @@ if __name__ == "__main__":
             hf_repo_id=hf_repo_id,
             hf_private_repo=args.hf_private_repo,
         )
+
