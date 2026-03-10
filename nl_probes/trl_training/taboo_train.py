@@ -389,9 +389,9 @@ def combine_with_ultrachat(
 
 if __name__ == "__main__":
     model_names = [
-        "Qwen/Qwen3-8B",
+        # "Qwen/Qwen3-8B",
         # "Qwen/Qwen3-14B",
-        # "google/gemma-2-9b-it",
+        "google/gemma-2-9b-it",
         # "Qwen/Qwen3-32B",
         # "google/gemma-2-27b-it",
     ]
@@ -417,7 +417,7 @@ if __name__ == "__main__":
         "bcywinski/taboo-salt",
         "bcywinski/taboo-book",
         "bcywinski/taboo-blue",
-        "bcywinski/taboo-adversarial",
+        # "bcywinski/taboo-adversarial",
         "bcywinski/taboo-gold",
         "bcywinski/taboo-leaf",
         "bcywinski/taboo-smile",
