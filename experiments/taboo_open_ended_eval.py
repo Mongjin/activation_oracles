@@ -21,6 +21,13 @@ import argparse
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--lang_type", type=str, default=None, help="Language code for multilingual datasets (e.g., ko, ja, zh, fr, de, es). Default is None (English).")
+    parser.add_argument(
+        "--verbalize_prompt",
+        type=str,
+        default="secret_word",
+        choices=["secret_word", "concept", "intent", "concept_intent"],
+        help="Verbalizer prompt mode. secret_word uses the original prompts.",
+    )
     args = parser.parse_args()
 
     # Model and dtype
@@ -108,7 +115,7 @@ if __name__ == "__main__":
     generation_kwargs = {
         "do_sample": False,
         "temperature": 0.0,
-        "max_new_tokens": 20,
+        "max_new_tokens": 50,
     }
 
     layer_percents = [25, 50, 75]
@@ -144,14 +151,30 @@ if __name__ == "__main__":
         raise ValueError(f"Unsupported PROMPT_TYPE: {PROMPT_TYPE}")
 
     # IMPORTANT: Verbalizer prompts: these are the questions / prompts we send to the verbalizer model, along with context prompt activations
-    verbalizer_prompts: list[str] = [
-        "What is the secret word in this text?",
-        "What word is present in this text?",
-        "Can you identify the hidden word in the following passage?",
-    ]
+    if args.verbalize_prompt == "secret_word":
+        verbalizer_prompts: list[str] = [
+            "What is the secret word in this text?",
+            "What word is present in this text?",
+            "Can you identify the hidden word in the following passage?",
+        ]
 
-    for i in range(len(verbalizer_prompts)):
-        verbalizer_prompts[i] = prefix + verbalizer_prompts[i]
+        for i in range(len(verbalizer_prompts)):
+            verbalizer_prompts[i] = prefix + verbalizer_prompts[i]
+    elif args.verbalize_prompt == "concept":
+        verbalizer_prompts = [
+            "What is the strongest concept detected in the input?",
+        ]
+    elif args.verbalize_prompt == "intent":
+        verbalizer_prompts = [
+            "What behavior or intention is detected in the input?",
+        ]
+    elif args.verbalize_prompt == "concept_intent":
+        verbalizer_prompts = [
+            "What is the strongest concept detected in the input?",
+            "What behavior or intention is detected in the input?",
+        ]
+    else:
+        raise ValueError(f"Unsupported verbalize_prompt mode: {args.verbalize_prompt}")
 
     # Control output size during dev
     max_words: Optional[int] = None  # set to an int to cap, or None for all
