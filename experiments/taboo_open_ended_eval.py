@@ -177,7 +177,7 @@ if __name__ == "__main__":
     for selected_layer_percent in layer_percents:
         config = base_experiment.VerbalizerEvalConfig(
             model_name=model_name,
-            activation_input_types=["lora", "orig"],
+            activation_input_types=["lora"],
             eval_batch_size=512,
             verbalizer_generation_kwargs=generation_kwargs,
             full_seq_repeats=1,
