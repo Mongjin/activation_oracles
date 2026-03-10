@@ -28,6 +28,7 @@ if __name__ == "__main__":
         choices=["secret_word", "concept", "intent", "concept_intent"],
         help="Verbalizer prompt mode. secret_word uses the original prompts.",
     )
+    parser.add_argument("--FT_role_swap", action='store_true', default=False)
     args = parser.parse_args()
 
     # Model and dtype
@@ -95,6 +96,8 @@ if __name__ == "__main__":
             # "adamkarvonen/checkpoints_latentqa_only_gemma-2-9b-it_lr_3e-4",
         ]
         target_lora_path_template: Optional[str] = "bcywinski/gemma-2-9b-it-taboo-{lora_path}"
+        if args.FT_role_swap:
+            target_lora_path_template: Optional[str] = "../nl_probes/trl_training/model_lora_role_swapped/gemma-2-9b-it-taboo-{lora_path}-role-swapped"
         segment_start = -10
     else:
         raise ValueError(f"Unsupported MODEL_NAME: {model_name}")
@@ -282,7 +285,10 @@ if __name__ == "__main__":
                     lora_name = verbalizer_lora_path.split("/")[-1].replace("/", "_").replace(".", "_")
                     model.delete_adapter(sanitized_verbalizer_name)
 
-                output_json = output_json_template.format(lora=f"{lora_name}_layer_{selected_layer_percent}_{args.verbalize_prompt}")
+                if args.FT_role_swap:
+                    output_json = output_json_template.format(lora=f"{lora_name}_layer_{selected_layer_percent}_{args.verbalize_prompt}_swapped")
+                else:
+                    output_json = output_json_template.format(lora=f"{lora_name}_layer_{selected_layer_percent}_{args.verbalize_prompt}")
                 with open(output_json, "w") as f:
                     json.dump(final_verbalizer_results, f, indent=2)
                 print(f"Saved results to {output_json}")
