@@ -97,7 +97,7 @@ if __name__ == "__main__":
         ]
         target_lora_path_template: Optional[str] = "bcywinski/gemma-2-9b-it-taboo-{lora_path}"
         if args.FT_role_swap:
-            target_lora_path_template: Optional[str] = "../nl_probes/trl_training/model_lora_role_swapped/gemma-2-9b-it-taboo-{lora_path}-role-swapped"
+            target_lora_path_template: Optional[str] = "/home/mongjin/activation_oracles/nl_probes/trl_training/model_lora_role_swapped/gemma-2-9b-it-taboo-{lora_path}-role-swapped"
         segment_start = -10
     else:
         raise ValueError(f"Unsupported MODEL_NAME: {model_name}")
