@@ -76,80 +76,43 @@ def prepend_random_user_starter(messages: list[dict]) -> list[dict]:
     return [{"role": "user", "content": starter}] + messages
 
 
-def manual_qwen3_assistant_mask(messages: list[dict[str, str]], tokenizer: AutoTokenizer, final_message_loss_only: bool = False):
-    input_ids = tokenizer.apply_chat_template(
+def _chat_template_ids(messages: list[dict[str, str]], tokenizer: AutoTokenizer) -> list[int]:
+    token_ids = tokenizer.apply_chat_template(
         messages,
         tokenize=True,
-        return_tensors="pt",
         add_generation_prompt=False,
         return_dict=False,
         enable_thinking=False,
     )
+    if isinstance(token_ids, torch.Tensor):
+        if token_ids.ndim == 2:
+            token_ids = token_ids.squeeze(0)
+        return token_ids.tolist()
+    return list(token_ids)
 
-    tmp = tokenizer.encode("<|im_start|>assistant\n")
-    assert len(tmp) == 3, f"Expected 3 tokens, got {len(tmp)}"
-    begin_turn_idx = tmp[0]
-    asst_idx = tmp[1]
-    newline_idx = tmp[2]
 
-    tmp_think = tokenizer.encode("<think>\n</think>")
-    assert len(tmp_think) == 3, f"Expected 3 tokens, got {len(tmp_think)}"
-    begin_think_idx = tmp_think[0]
-    end_think_idx = tmp_think[2]
+def manual_qwen3_assistant_mask(messages: list[dict[str, str]], tokenizer: AutoTokenizer, final_message_loss_only: bool = False):
+    input_ids_list = _chat_template_ids(messages, tokenizer)
+    assistant_mask = torch.zeros(len(input_ids_list), dtype=torch.long)
 
-    eos_id = tokenizer.eos_token_id
-    assistant_mask = torch.zeros_like(input_ids)
+    assistant_message_idxs = [i for i, msg in enumerate(messages) if msg["role"] == "assistant"]
+    if final_message_loss_only and len(assistant_message_idxs) > 0:
+        assistant_message_idxs = [assistant_message_idxs[-1]]
 
-    num_messages = len(messages)
-    cur_eos_idx = 0
-    cur_message_idx = 0
+    for msg_idx in assistant_message_idxs:
+        if msg_idx == 0:
+            prefix_ids = []
+        else:
+            prefix_ids = _chat_template_ids(messages[:msg_idx], tokenizer)
+        upto_ids = _chat_template_ids(messages[: msg_idx + 1], tokenizer)
 
-    for batch_idx in range(input_ids.shape[0]):
-        sequence = input_ids[batch_idx]
-        in_assistant_turn = False
-        train_on_this_message = False
-
-        i = 0
-        while i < len(sequence):
-            if i + 2 < len(sequence):
-                if sequence[i] == begin_turn_idx and sequence[i + 1] == asst_idx and sequence[i + 2] == newline_idx:
-                    i += 3
-                    cur_message_idx += 1
-                    in_assistant_turn = True
-
-                    if not final_message_loss_only:
-                        train_on_this_message = True
-
-                    if cur_message_idx == len(messages) - 1:
-                        assert sequence[i] == begin_think_idx and sequence[i + 2] == end_think_idx
-                        i += 3
-                        train_on_this_message = True
-                    continue
-
-            if sequence[i] == eos_id:
-                if in_assistant_turn:
-                    cur_message_idx += 1
-                    if train_on_this_message:
-                        assistant_mask[batch_idx, i] = 1
-
-                in_assistant_turn = False
-                i += 1
-                cur_eos_idx += 1
-                continue
-
-            if in_assistant_turn and train_on_this_message:
-                assistant_mask[batch_idx, i] = 1
-            else:
-                assistant_mask[batch_idx, i] = 0
-
-            i += 1
-
-    assert cur_eos_idx == num_messages, f"Expected {num_messages} messages, got {cur_eos_idx}"
-    assert cur_message_idx == num_messages, f"Expected {num_messages} messages, got {cur_message_idx}"
+        start = len(prefix_ids)
+        end = len(upto_ids)
+        assistant_mask[start:end] = 1
 
     return {
-        "input_ids": input_ids.squeeze(0),
-        "assistant_masks": assistant_mask.squeeze(0),
+        "input_ids": torch.tensor(input_ids_list, dtype=torch.long),
+        "assistant_masks": assistant_mask,
     }
 
 
@@ -415,4 +378,3 @@ if __name__ == "__main__":
             hf_repo_id=hf_repo_id,
             hf_private_repo=args.hf_private_repo,
         )
-
