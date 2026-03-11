@@ -29,7 +29,7 @@ def get_hider_lora_template(model_name: str) -> str:
 
 def get_default_guesser_lora_template(model_name: str) -> str:
     model_suffix = model_name.split("/")[-1]
-    return f"./model_lora_role_swapped/{model_suffix}-taboo-{{lora_path}}-role-swapped"
+    return f"/home/mongjin/activation_oracles/nl_probes/trl_training/model_lora_role_swapped/{model_suffix}-taboo-{{lora_path}}-role-swapped"
 
 
 def get_verbalizer_lora_paths(model_name: str) -> list[Optional[str]]:
