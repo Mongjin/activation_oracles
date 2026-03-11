@@ -105,6 +105,14 @@ def build_verbalizer_prompt_infos(
     return infos
 
 
+def maybe_normalize_acts(acts: torch.Tensor, mode: str) -> torch.Tensor:
+    if mode == "raw":
+        return acts
+    if mode == "unit":
+        return torch.nn.functional.normalize(acts, dim=-1)
+    raise ValueError(f"Unsupported difference_mode: {mode}")
+
+
 def collect_acts_for_adapter(
     model: AutoModelForCausalLM,
     inputs_BL: dict[str, torch.Tensor],
@@ -134,6 +142,7 @@ def collect_intervention_activations_for_batch(
     guesser_adapter_name: str,
     experiment: str,
     intervention_scale: float,
+    difference_mode: str,
 ) -> tuple[dict[str, torch.Tensor], dict[int, torch.Tensor]]:
     inputs_BL = base_experiment.encode_messages(
         tokenizer=tokenizer,
@@ -156,7 +165,10 @@ def collect_intervention_activations_for_batch(
         adapter_name=guesser_adapter_name,
     )
 
-    difference = hider_acts - guesser_acts
+    hider_acts_for_diff = maybe_normalize_acts(hider_acts, difference_mode)
+    guesser_acts_for_diff = maybe_normalize_acts(guesser_acts, difference_mode)
+    difference = hider_acts_for_diff - guesser_acts_for_diff
+
     if experiment == "exp1":
         intervention_acts = guesser_acts + intervention_scale * difference
     elif experiment == "exp2":
@@ -180,6 +192,7 @@ def run_verbalizer_intervention(
     device: torch.device,
     experiment: str,
     intervention_scale: float,
+    difference_mode: str,
 ) -> list[dict[str, Any]]:
     dtype = torch.bfloat16
     injection_submodule = get_hf_submodule(model, config.injection_layer)
@@ -204,6 +217,7 @@ def run_verbalizer_intervention(
                     "combo_index": start + len(combo_bases),
                     "experiment": experiment,
                     "intervention_scale": intervention_scale,
+                    "difference_mode": difference_mode,
                 }
             )
 
@@ -217,6 +231,7 @@ def run_verbalizer_intervention(
             guesser_adapter_name=guesser_adapter_name,
             experiment=experiment,
             intervention_scale=intervention_scale,
+            difference_mode=difference_mode,
         )
 
         seq_len = int(inputs_BL["input_ids"].shape[1])
@@ -243,6 +258,7 @@ def run_verbalizer_intervention(
                 "context_index_within_batch": b_idx,
                 "experiment": base["experiment"],
                 "intervention_scale": base["intervention_scale"],
+                "difference_mode": base["difference_mode"],
                 "active_layer": config.active_layer,
                 "selected_layer_percent": config.selected_layer_percent,
             }
@@ -296,6 +312,7 @@ def run_verbalizer_intervention(
                     "full_sequence_responses": [],
                     "experiment": meta["experiment"],
                     "intervention_scale": meta["intervention_scale"],
+                    "difference_mode": meta["difference_mode"],
                     "selected_layer_percent": meta["selected_layer_percent"],
                     "active_layer": meta["active_layer"],
                 }
@@ -327,6 +344,7 @@ def run_verbalizer_intervention(
                     "context_input_ids": context_input_ids_list[bucket["context_index_within_batch"]],
                     "experiment": bucket["experiment"],
                     "intervention_scale": bucket["intervention_scale"],
+                    "difference_mode": bucket["difference_mode"],
                     "selected_layer_percent": bucket["selected_layer_percent"],
                     "active_layer": bucket["active_layer"],
                 }
@@ -361,6 +379,7 @@ if __name__ == "__main__":
     )
     parser.add_argument("--experiment", type=str, required=True, choices=["exp1", "exp2"])
     parser.add_argument("--intervention_scale", type=float, default=1.0)
+    parser.add_argument("--difference_mode", type=str, default="raw", choices=["raw", "unit"])
     parser.add_argument("--target_words", type=str, nargs="+", default=None)
     parser.add_argument("--max_context_prompts", type=int, default=None)
     parser.add_argument("--output_dir", type=str, default="./taboo_eval_results")
@@ -472,6 +491,7 @@ if __name__ == "__main__":
                 combo_pbar.set_postfix(
                     {
                         "exp": args.experiment,
+                        "diff": args.difference_mode,
                         "layer": selected_layer_percent,
                         "oracle": verbalizer_lora_path.split("/")[-1] if verbalizer_lora_path else "base_model",
                         "target": target_word,
@@ -497,6 +517,7 @@ if __name__ == "__main__":
                     device=device,
                     experiment=args.experiment,
                     intervention_scale=args.intervention_scale,
+                    difference_mode=args.difference_mode,
                 )
                 verbalizer_results.extend(results)
 
@@ -511,6 +532,7 @@ if __name__ == "__main__":
                 "config": asdict(config),
                 "experiment": args.experiment,
                 "intervention_scale": args.intervention_scale,
+                "difference_mode": args.difference_mode,
                 "verbalizer_lora_path": verbalizer_lora_path,
                 "hider_lora_template": hider_lora_template,
                 "guesser_lora_template": guesser_lora_template,
@@ -524,7 +546,7 @@ if __name__ == "__main__":
                 model.delete_adapter(sanitized_verbalizer_name)
 
             output_json = output_json_template.format(
-                lora=f"{lora_name}_layer_{selected_layer_percent}_{args.verbalize_prompt}_{args.experiment}"
+                lora=f"{lora_name}_layer_{selected_layer_percent}_{args.verbalize_prompt}_{args.experiment}_{args.difference_mode}"
             )
             with open(output_json, "w", encoding="utf-8") as f:
                 json.dump(final_verbalizer_results, f, indent=2)
