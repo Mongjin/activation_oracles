@@ -2,8 +2,9 @@ import argparse
 import json
 import os
 import random
+from dataclasses import asdict
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
 import torch
 from peft import LoraConfig
@@ -14,12 +15,8 @@ import nl_probes.base_experiment as base_experiment
 from nl_probes.base_experiment import VerbalizerInputInfo
 from nl_probes.utils.activation_utils import collect_activations_multiple_layers, get_hf_submodule
 from nl_probes.utils.common import load_model, load_tokenizer
-from nl_probes.utils.dataset_utils import TrainingDataPoint, create_training_datapoint
+from nl_probes.utils.dataset_utils import TrainingDataPoint
 from nl_probes.utils.eval import run_evaluation
-
-
-def normalize_text(s: str) -> str:
-    return s.lower().strip()
 
 
 def get_hider_lora_template(model_name: str) -> str:
@@ -32,7 +29,7 @@ def get_hider_lora_template(model_name: str) -> str:
 
 def get_default_guesser_lora_template(model_name: str) -> str:
     model_suffix = model_name.split("/")[-1]
-    return f"/home/mongjin/activation_oracles/nl_probes/trl_training/model_lora_role_swapped/{model_suffix}-taboo-{{lora_path}}-role-swapped"
+    return f"./model_lora_role_swapped/{model_suffix}-taboo-{{lora_path}}-role-swapped"
 
 
 def get_verbalizer_lora_paths(model_name: str) -> list[Optional[str]]:
@@ -137,7 +134,7 @@ def collect_intervention_activations_for_batch(
     guesser_adapter_name: str,
     experiment: str,
     intervention_scale: float,
-) -> tuple[dict[str, torch.Tensor], torch.Tensor]:
+) -> tuple[dict[str, torch.Tensor], dict[int, torch.Tensor]]:
     inputs_BL = base_experiment.encode_messages(
         tokenizer=tokenizer,
         message_dicts=[info.context_prompt for info in verbalizer_prompt_infos],
@@ -167,89 +164,53 @@ def collect_intervention_activations_for_batch(
     else:
         raise ValueError(f"Unsupported experiment: {experiment}")
 
-    return inputs_BL, intervention_acts
+    return inputs_BL, {config.active_layer: intervention_acts}
 
 
-def make_eval_datapoints(
-    verbalizer_prompt_infos: list[VerbalizerInputInfo],
-    inputs_BL: dict[str, torch.Tensor],
-    intervention_acts: torch.Tensor,
-    config: base_experiment.VerbalizerEvalConfig,
-    tokenizer: AutoTokenizer,
-    layer_percent: int,
-    verbalizer_lora_path: Optional[str],
-    hider_lora_path: str,
-    guesser_lora_path: str,
-    experiment: str,
-    intervention_scale: float,
-) -> list[TrainingDataPoint]:
-    datapoints: list[TrainingDataPoint] = []
-    seq_len = int(inputs_BL["input_ids"].shape[1])
-
-    for b_idx, info in enumerate(verbalizer_prompt_infos):
-        attn = inputs_BL["attention_mask"][b_idx]
-        real_len = int(attn.sum().item())
-        left_pad = seq_len - real_len
-        last_pos_abs = left_pad + real_len - 1
-        last_pos_rel = real_len - 1
-        context_input_ids = inputs_BL["input_ids"][b_idx, left_pad:].tolist()
-        acts_BD = intervention_acts[b_idx, [last_pos_abs], :]
-
-        datapoints.append(
-            create_training_datapoint(
-                datapoint_type="N/A",
-                prompt=info.verbalizer_prompt,
-                target_response="N/A",
-                layer=config.active_layer,
-                num_positions=1,
-                tokenizer=tokenizer,
-                acts_BD=acts_BD,
-                feature_idx=-1,
-                context_input_ids=context_input_ids,
-                context_positions=[last_pos_rel],
-                ds_label="N/A",
-                meta_info={
-                    "selected_layer_percent": layer_percent,
-                    "active_layer": config.active_layer,
-                    "verbalizer_lora_path": verbalizer_lora_path,
-                    "hider_lora_path": hider_lora_path,
-                    "guesser_lora_path": guesser_lora_path,
-                    "ground_truth": info.ground_truth,
-                    "context_prompt": info.context_prompt,
-                    "verbalizer_prompt": info.verbalizer_prompt,
-                    "experiment": experiment,
-                    "intervention_scale": intervention_scale,
-                },
-            )
-        )
-
-    return datapoints
-
-
-def run_intervention_eval(
+def run_verbalizer_intervention(
     model: AutoModelForCausalLM,
     tokenizer: AutoTokenizer,
-    device: torch.device,
-    config: base_experiment.VerbalizerEvalConfig,
     verbalizer_prompt_infos: list[VerbalizerInputInfo],
     verbalizer_lora_path: Optional[str],
     hider_adapter_name: str,
     guesser_adapter_name: str,
     hider_lora_path: str,
     guesser_lora_path: str,
-    layer_percent: int,
+    config: base_experiment.VerbalizerEvalConfig,
+    device: torch.device,
     experiment: str,
     intervention_scale: float,
-) -> list[dict]:
+) -> list[dict[str, Any]]:
+    dtype = torch.bfloat16
     injection_submodule = get_hf_submodule(model, config.injection_layer)
-    eval_data: list[TrainingDataPoint] = []
+
+    pbar = tqdm(total=len(verbalizer_prompt_infos), desc="Verbalizer Eval Progress", position=1)
+    results: list[dict[str, Any]] = []
 
     for start in range(0, len(verbalizer_prompt_infos), config.eval_batch_size):
-        batch_infos = verbalizer_prompt_infos[start : start + config.eval_batch_size]
-        inputs_BL, intervention_acts = collect_intervention_activations_for_batch(
+        batch = verbalizer_prompt_infos[start : start + config.eval_batch_size]
+        message_dicts: list[list[dict[str, str]]] = []
+        combo_bases: list[dict[str, Any]] = []
+
+        for verbalizer_prompt_info in batch:
+            message_dicts.append(verbalizer_prompt_info.context_prompt)
+            combo_bases.append(
+                {
+                    "hider_lora_path": hider_lora_path,
+                    "guesser_lora_path": guesser_lora_path,
+                    "context_prompt": verbalizer_prompt_info.context_prompt,
+                    "verbalizer_prompt": verbalizer_prompt_info.verbalizer_prompt,
+                    "ground_truth": verbalizer_prompt_info.ground_truth,
+                    "combo_index": start + len(combo_bases),
+                    "experiment": experiment,
+                    "intervention_scale": intervention_scale,
+                }
+            )
+
+        inputs_BL, target_activations = collect_intervention_activations_for_batch(
             model=model,
             tokenizer=tokenizer,
-            verbalizer_prompt_infos=batch_infos,
+            verbalizer_prompt_infos=batch,
             config=config,
             device=device,
             hider_adapter_name=hider_adapter_name,
@@ -257,60 +218,125 @@ def run_intervention_eval(
             experiment=experiment,
             intervention_scale=intervention_scale,
         )
-        eval_data.extend(
-            make_eval_datapoints(
-                verbalizer_prompt_infos=batch_infos,
-                inputs_BL=inputs_BL,
-                intervention_acts=intervention_acts,
-                config=config,
-                tokenizer=tokenizer,
-                layer_percent=layer_percent,
-                verbalizer_lora_path=verbalizer_lora_path,
-                hider_lora_path=hider_lora_path,
-                guesser_lora_path=guesser_lora_path,
-                experiment=experiment,
-                intervention_scale=intervention_scale,
-            )
-        )
 
-    if verbalizer_lora_path is None:
-        model.disable_adapters()
+        seq_len = int(inputs_BL["input_ids"].shape[1])
+        context_input_ids_list: list[list[int]] = []
+        verbalizer_inputs: list[TrainingDataPoint] = []
 
-    responses = run_evaluation(
-        eval_data=eval_data,
-        model=model,
-        tokenizer=tokenizer,
-        submodule=injection_submodule,
-        device=device,
-        dtype=torch.bfloat16,
-        global_step=-1,
-        lora_path=verbalizer_lora_path,
-        eval_batch_size=config.eval_batch_size,
-        steering_coefficient=config.steering_coefficient,
-        generation_kwargs=config.verbalizer_generation_kwargs,
-    )
+        for b_idx in range(len(message_dicts)):
+            base = combo_bases[b_idx]
+            attn = inputs_BL["attention_mask"][b_idx]
+            real_len = int(attn.sum().item())
+            left_pad = seq_len - real_len
+            context_input_ids = inputs_BL["input_ids"][b_idx, left_pad:].tolist()
+            context_input_ids_list.append(context_input_ids)
 
-    records = []
-    for response in responses:
-        gt = normalize_text(response.meta_info["ground_truth"])
-        out = normalize_text(response.api_response)
-        records.append(
-            {
-                "ground_truth": response.meta_info["ground_truth"],
-                "response": response.api_response,
-                "is_correct": gt in out,
-                "selected_layer_percent": response.meta_info["selected_layer_percent"],
-                "active_layer": response.meta_info["active_layer"],
-                "verbalizer_lora_path": response.meta_info["verbalizer_lora_path"],
-                "hider_lora_path": response.meta_info["hider_lora_path"],
-                "guesser_lora_path": response.meta_info["guesser_lora_path"],
-                "context_prompt": response.meta_info["context_prompt"],
-                "verbalizer_prompt": response.meta_info["verbalizer_prompt"],
-                "experiment": response.meta_info["experiment"],
-                "intervention_scale": response.meta_info["intervention_scale"],
+            base_meta = {
+                "hider_lora_path": base["hider_lora_path"],
+                "guesser_lora_path": base["guesser_lora_path"],
+                "context_prompt": base["context_prompt"],
+                "verbalizer_prompt": base["verbalizer_prompt"],
+                "ground_truth": base["ground_truth"],
+                "combo_index": base["combo_index"],
+                "act_key": "intervention",
+                "num_tokens": len(context_input_ids),
+                "context_index_within_batch": b_idx,
+                "experiment": base["experiment"],
+                "intervention_scale": base["intervention_scale"],
+                "active_layer": config.active_layer,
+                "selected_layer_percent": config.selected_layer_percent,
             }
+            verbalizer_inputs.extend(
+                base_experiment.create_verbalizer_inputs(
+                    acts_BLD_by_layer_dict=target_activations,
+                    context_input_ids=context_input_ids,
+                    verbalizer_prompt=base["verbalizer_prompt"],
+                    act_layer=config.active_layer,
+                    prompt_layer=config.active_layer,
+                    tokenizer=tokenizer,
+                    config=config,
+                    batch_idx=b_idx,
+                    left_pad=left_pad,
+                    base_meta=base_meta,
+                )
+            )
+
+        if verbalizer_lora_path is not None:
+            model.set_adapter(verbalizer_lora_path)
+
+        responses = run_evaluation(
+            eval_data=verbalizer_inputs,
+            model=model,
+            tokenizer=tokenizer,
+            submodule=injection_submodule,
+            device=device,
+            dtype=dtype,
+            global_step=-1,
+            lora_path=verbalizer_lora_path,
+            eval_batch_size=config.eval_batch_size,
+            steering_coefficient=config.steering_coefficient,
+            generation_kwargs=config.verbalizer_generation_kwargs,
         )
-    return records
+
+        agg: dict[tuple[str, int], dict[str, Any]] = {}
+        for r in responses:
+            meta = r.meta_info
+            key = (meta["act_key"], int(meta["combo_index"]))
+            if key not in agg:
+                agg[key] = {
+                    "hider_lora_path": hider_lora_path,
+                    "guesser_lora_path": guesser_lora_path,
+                    "context_prompt": meta["context_prompt"],
+                    "verbalizer_prompt": meta["verbalizer_prompt"],
+                    "ground_truth": meta["ground_truth"],
+                    "num_tokens": int(meta["num_tokens"]),
+                    "context_index_within_batch": int(meta["context_index_within_batch"]),
+                    "token_responses": [None] * int(meta["num_tokens"]),
+                    "segment_responses": [],
+                    "full_sequence_responses": [],
+                    "experiment": meta["experiment"],
+                    "intervention_scale": meta["intervention_scale"],
+                    "selected_layer_percent": meta["selected_layer_percent"],
+                    "active_layer": meta["active_layer"],
+                }
+            bucket = agg[key]
+            dp_kind = meta["dp_kind"]
+            if dp_kind == "tokens":
+                bucket["token_responses"][int(meta["token_index"])] = r.api_response
+            elif dp_kind == "segment":
+                bucket["segment_responses"].append(r.api_response)
+            elif dp_kind == "full_seq":
+                bucket["full_sequence_responses"].append(r.api_response)
+            else:
+                raise ValueError(f"Unknown dp_kind: {dp_kind}")
+
+        for (act_key, _), bucket in agg.items():
+            results.append(
+                {
+                    "verbalizer_lora_path": verbalizer_lora_path,
+                    "hider_lora_path": bucket["hider_lora_path"],
+                    "guesser_lora_path": bucket["guesser_lora_path"],
+                    "context_prompt": bucket["context_prompt"],
+                    "act_key": act_key,
+                    "verbalizer_prompt": bucket["verbalizer_prompt"],
+                    "ground_truth": bucket["ground_truth"],
+                    "num_tokens": bucket["num_tokens"],
+                    "token_responses": bucket["token_responses"],
+                    "full_sequence_responses": bucket["full_sequence_responses"],
+                    "segment_responses": bucket["segment_responses"],
+                    "context_input_ids": context_input_ids_list[bucket["context_index_within_batch"]],
+                    "experiment": bucket["experiment"],
+                    "intervention_scale": bucket["intervention_scale"],
+                    "selected_layer_percent": bucket["selected_layer_percent"],
+                    "active_layer": bucket["active_layer"],
+                }
+            )
+
+        pbar.set_postfix({"oracle": verbalizer_lora_path.split("/")[-1] if verbalizer_lora_path else "None"})
+        pbar.update(len(batch))
+
+    pbar.close()
+    return results
 
 
 if __name__ == "__main__":
@@ -327,7 +353,12 @@ if __name__ == "__main__":
     parser.add_argument("--max_new_tokens", type=int, default=50)
     parser.add_argument("--temperature", type=float, default=0.0)
     parser.add_argument("--do_sample", action="store_true")
-    parser.add_argument("--verbalize_prompt", type=str, default="secret_word", choices=["secret_word", "concept", "intent", "concept_intent"])
+    parser.add_argument(
+        "--verbalize_prompt",
+        type=str,
+        default="secret_word",
+        choices=["secret_word", "concept", "intent", "concept_intent"],
+    )
     parser.add_argument("--experiment", type=str, required=True, choices=["exp1", "exp2"])
     parser.add_argument("--intervention_scale", type=float, default=1.0)
     parser.add_argument("--target_words", type=str, nargs="+", default=None)
@@ -335,10 +366,6 @@ if __name__ == "__main__":
     parser.add_argument("--output_dir", type=str, default="./taboo_eval_results")
     parser.add_argument("--guesser_lora_template", type=str, default=None)
     args = parser.parse_args()
-
-    random.seed(42)
-    torch.manual_seed(42)
-    torch.set_grad_enabled(False)
 
     if args.target_words is None:
         target_words = [
@@ -366,16 +393,36 @@ if __name__ == "__main__":
     else:
         target_words = args.target_words
 
+    random.seed(42)
+    torch.manual_seed(42)
+    torch.set_grad_enabled(False)
+
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    dtype = torch.bfloat16
+    model_name_str = args.model_name.split("/")[-1].replace(".", "_")
+
+    if args.model_name == "Qwen/Qwen3-8B":
+        segment_start = -10
+    elif args.model_name == "google/gemma-2-9b-it":
+        segment_start = -10
+    else:
+        raise ValueError(f"Unsupported MODEL_NAME: {args.model_name}")
+
+    verbalizer_lora_paths = get_verbalizer_lora_paths(args.model_name)
     hider_lora_template = get_hider_lora_template(args.model_name)
     guesser_lora_template = args.guesser_lora_template or get_default_guesser_lora_template(args.model_name)
-    verbalizer_lora_paths = get_verbalizer_lora_paths(args.model_name)
+
     context_prompts = load_context_prompts(args.prompt_type, args.dataset_type, args.lang_type)
     if args.max_context_prompts is not None:
         context_prompts = context_prompts[: args.max_context_prompts]
     verbalizer_prompts = get_verbalizer_prompts(args.verbalize_prompt)
 
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    dtype = torch.bfloat16
+    experiments_dir = args.output_dir
+    lang_suffix = f"_{args.lang_type}" if args.lang_type else ""
+    output_json_dir = f"{experiments_dir}/{model_name_str}_activation_intervention_{args.prompt_type}{lang_suffix}_{args.dataset_type}"
+    os.makedirs(experiments_dir, exist_ok=True)
+    os.makedirs(output_json_dir, exist_ok=True)
+    output_json_template = f"{output_json_dir}/taboo_activation_intervention" + "_{lora}.json"
 
     print(f"Loading tokenizer: {args.model_name}")
     tokenizer = load_tokenizer(args.model_name)
@@ -387,9 +434,8 @@ if __name__ == "__main__":
     dummy_config = LoraConfig()
     model.add_adapter(dummy_config, adapter_name="default")
 
-    results = []
     total_combos = len(args.layer_percents) * len(verbalizer_lora_paths) * len(target_words)
-    combo_pbar = tqdm(total=total_combos, desc="Activation intervention eval")
+    combo_pbar = tqdm(total=total_combos, desc="Activation intervention eval", position=0)
 
     for selected_layer_percent in args.layer_percents:
         config = base_experiment.VerbalizerEvalConfig(
@@ -403,11 +449,13 @@ if __name__ == "__main__":
             },
             full_seq_repeats=1,
             segment_repeats=1,
+            segment_start_idx=segment_start,
             layer_percents=args.layer_percents,
             selected_layer_percent=selected_layer_percent,
         )
 
         for verbalizer_lora_path in verbalizer_lora_paths:
+            verbalizer_results: list[dict[str, Any]] = []
             sanitized_verbalizer_name = None
             if verbalizer_lora_path is not None:
                 sanitized_verbalizer_name = base_experiment.load_lora_adapter(model, verbalizer_lora_path)
@@ -436,83 +484,50 @@ if __name__ == "__main__":
                     verbalizer_prompts=verbalizer_prompts,
                 )
 
-                records = run_intervention_eval(
+                results = run_verbalizer_intervention(
                     model=model,
                     tokenizer=tokenizer,
-                    device=device,
-                    config=config,
                     verbalizer_prompt_infos=verbalizer_prompt_infos,
                     verbalizer_lora_path=verbalizer_lora_path,
                     hider_adapter_name=hider_adapter_name,
                     guesser_adapter_name=guesser_adapter_name,
                     hider_lora_path=hider_lora_path,
                     guesser_lora_path=guesser_lora_path,
-                    layer_percent=selected_layer_percent,
+                    config=config,
+                    device=device,
                     experiment=args.experiment,
                     intervention_scale=args.intervention_scale,
                 )
-
-                num_correct = sum(record["is_correct"] for record in records)
-                results.append(
-                    {
-                        "target_word": target_word,
-                        "selected_layer_percent": selected_layer_percent,
-                        "active_layer": config.active_layer,
-                        "verbalizer_lora_path": verbalizer_lora_path,
-                        "hider_lora_path": hider_lora_path,
-                        "guesser_lora_path": guesser_lora_path,
-                        "experiment": args.experiment,
-                        "intervention_scale": args.intervention_scale,
-                        "num_examples": len(records),
-                        "num_correct": num_correct,
-                        "accuracy": num_correct / len(records),
-                        "records": records,
-                    }
-                )
+                verbalizer_results.extend(results)
 
                 if guesser_adapter_name in model.peft_config:
                     model.delete_adapter(guesser_adapter_name)
                 if hider_adapter_name in model.peft_config:
                     model.delete_adapter(hider_adapter_name)
+
                 combo_pbar.update(1)
 
-            if sanitized_verbalizer_name is not None and sanitized_verbalizer_name in model.peft_config:
+            final_verbalizer_results = {
+                "config": asdict(config),
+                "experiment": args.experiment,
+                "intervention_scale": args.intervention_scale,
+                "verbalizer_lora_path": verbalizer_lora_path,
+                "hider_lora_template": hider_lora_template,
+                "guesser_lora_template": guesser_lora_template,
+                "results": verbalizer_results,
+            }
+
+            if verbalizer_lora_path is None:
+                lora_name = "base_model"
+            else:
+                lora_name = verbalizer_lora_path.split("/")[-1].replace("/", "_").replace(".", "_")
                 model.delete_adapter(sanitized_verbalizer_name)
 
+            output_json = output_json_template.format(
+                lora=f"{lora_name}_layer_{selected_layer_percent}_{args.verbalize_prompt}_{args.experiment}"
+            )
+            with open(output_json, "w", encoding="utf-8") as f:
+                json.dump(final_verbalizer_results, f, indent=2)
+            print(f"Saved results to {output_json}")
+
     combo_pbar.close()
-
-    model_name_str = args.model_name.split("/")[-1].replace(".", "_")
-    lang_suffix = f"_{args.lang_type}" if args.lang_type else ""
-    output_json_dir = f"{args.output_dir}/{model_name_str}_activation_intervention_{args.prompt_type}{lang_suffix}_{args.dataset_type}"
-    os.makedirs(output_json_dir, exist_ok=True)
-
-    final_output = {
-        "config": {
-            "model_name": args.model_name,
-            "prompt_type": args.prompt_type,
-            "dataset_type": args.dataset_type,
-            "lang_type": args.lang_type,
-            "layer_percents": args.layer_percents,
-            "eval_batch_size": args.eval_batch_size,
-            "target_words": target_words,
-            "max_context_prompts": args.max_context_prompts,
-            "verbalizer_lora_paths": verbalizer_lora_paths,
-            "verbalizer_prompts": verbalizer_prompts,
-            "generation_kwargs": {
-                "do_sample": args.do_sample,
-                "temperature": args.temperature,
-                "max_new_tokens": args.max_new_tokens,
-            },
-            "hider_lora_template": hider_lora_template,
-            "guesser_lora_template": guesser_lora_template,
-            "experiment": args.experiment,
-            "intervention_scale": args.intervention_scale,
-        },
-        "results": results,
-    }
-
-    output_json = f"{output_json_dir}/taboo_activation_intervention_{args.experiment}.json"
-    with open(output_json, "w", encoding="utf-8") as f:
-        json.dump(final_output, f, indent=2)
-
-    print(f"Saved results to {output_json}")
