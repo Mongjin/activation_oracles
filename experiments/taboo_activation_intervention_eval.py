@@ -546,7 +546,7 @@ if __name__ == "__main__":
                 model.delete_adapter(sanitized_verbalizer_name)
 
             output_json = output_json_template.format(
-                lora=f"{lora_name}_layer_{selected_layer_percent}_{args.verbalize_prompt}_{args.experiment}_{args.difference_mode}"
+                lora=f"{lora_name}_layer_{selected_layer_percent}_{args.verbalize_prompt}_{args.experiment}_{args.difference_mode}_{args.intervention_scale}"
             )
             with open(output_json, "w", encoding="utf-8") as f:
                 json.dump(final_verbalizer_results, f, indent=2)
