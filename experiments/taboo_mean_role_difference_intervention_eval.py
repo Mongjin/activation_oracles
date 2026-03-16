@@ -179,6 +179,33 @@ def extract_last_token_acts(acts_BLD: torch.Tensor, inputs_BL: dict[str, torch.T
     return torch.stack(gathered, dim=0)
 
 
+def get_last_token_positions(inputs_BL: dict[str, torch.Tensor]) -> list[int]:
+    seq_len = int(inputs_BL["input_ids"].shape[1])
+    positions = []
+    for b_idx in range(inputs_BL["input_ids"].shape[0]):
+        attn = inputs_BL["attention_mask"][b_idx]
+        real_len = int(attn.sum().item())
+        left_pad = seq_len - real_len
+        positions.append(left_pad + real_len - 1)
+    return positions
+
+
+def summarize_projection_values(values: torch.Tensor) -> dict[str, float]:
+    values = values.detach().float().cpu()
+    return {
+        "count": int(values.numel()),
+        "mean": float(values.mean().item()),
+        "std": float(values.std(unbiased=False).item()),
+        "median": float(values.median().item()),
+        "min": float(values.min().item()),
+        "max": float(values.max().item()),
+        "q25": float(torch.quantile(values, 0.25).item()),
+        "q75": float(torch.quantile(values, 0.75).item()),
+        "positive_fraction": float((values > 0).float().mean().item()),
+        "negative_fraction": float((values < 0).float().mean().item()),
+    }
+
+
 def compute_global_role_difference_feature(
     model: AutoModelForCausalLM,
     tokenizer: AutoTokenizer,
@@ -203,6 +230,7 @@ def compute_global_role_difference_feature(
     )
 
     word_differences = []
+    hider_last_token_acts_by_word: dict[str, torch.Tensor] = {}
 
     for target_word in target_words:
         hider_lora_path = hider_lora_template.format(lora_path=target_word)
@@ -252,7 +280,9 @@ def compute_global_role_difference_feature(
             hider_batches.append(extract_last_token_acts(hider_acts, inputs_BL))
             contrast_batches.append(extract_last_token_acts(contrast_acts, inputs_BL))
 
-        hider_mean = torch.cat(hider_batches, dim=0).mean(dim=0)
+        hider_last_token_acts = torch.cat(hider_batches, dim=0)
+        hider_last_token_acts_by_word[target_word] = hider_last_token_acts.detach().cpu()
+        hider_mean = hider_last_token_acts.mean(dim=0)
         contrast_mean = torch.cat(contrast_batches, dim=0).mean(dim=0)
         word_differences.append(hider_mean - contrast_mean)
 
@@ -263,6 +293,16 @@ def compute_global_role_difference_feature(
 
     feature_raw = torch.stack(word_differences, dim=0).mean(dim=0)
     feature_unit = torch.nn.functional.normalize(feature_raw, dim=0)
+    feature_unit_cpu = feature_unit.detach().cpu()
+
+    projection_stats_by_word = {}
+    all_projection_values = []
+    for target_word, hider_last_token_acts in hider_last_token_acts_by_word.items():
+        projections = torch.matmul(hider_last_token_acts, feature_unit_cpu)
+        projection_stats_by_word[target_word] = summarize_projection_values(projections)
+        all_projection_values.append(projections)
+
+    all_projection_values_tensor = torch.cat(all_projection_values, dim=0)
 
     return {
         "config": config,
@@ -270,6 +310,8 @@ def compute_global_role_difference_feature(
         "feature_unit": feature_unit,
         "feature_raw_norm": float(feature_raw.norm().item()),
         "feature_unit_norm": float(feature_unit.norm().item()),
+        "projection_stats": summarize_projection_values(all_projection_values_tensor),
+        "projection_stats_by_word": projection_stats_by_word,
     }
 
 
@@ -284,6 +326,7 @@ def run_global_feature_verbalizer(
     config: base_experiment.VerbalizerEvalConfig,
     device: torch.device,
     feature_subtract_scale: float,
+    removal_mode: str,
 ) -> list[dict[str, Any]]:
     dtype = torch.bfloat16
     injection_submodule = get_hf_submodule(model, config.injection_layer)
@@ -307,8 +350,26 @@ def run_global_feature_verbalizer(
             active_layer=config.active_layer,
             adapter_name=hider_adapter_name,
         )
-        feature_shift = (feature_unit_D.to(hider_acts.device, hider_acts.dtype) * feature_subtract_scale).view(1, 1, -1)
-        modified_hider_acts = hider_acts - feature_shift
+        feature_unit_device = feature_unit_D.to(hider_acts.device, hider_acts.dtype)
+        last_token_positions = get_last_token_positions(inputs_BL)
+        last_token_hider_acts = torch.stack(
+            [hider_acts[b_idx, last_pos, :] for b_idx, last_pos in enumerate(last_token_positions)],
+            dim=0,
+        )
+        last_token_projections = torch.matmul(last_token_hider_acts, feature_unit_device)
+
+        if removal_mode == "global_scale":
+            feature_shift = (feature_unit_device * feature_subtract_scale).view(1, 1, -1)
+            modified_hider_acts = hider_acts - feature_shift
+        elif removal_mode == "per_sample_projection":
+            modified_hider_acts = hider_acts.clone()
+            removal_vectors = (
+                last_token_projections.unsqueeze(-1) * feature_subtract_scale * feature_unit_device.unsqueeze(0)
+            )
+            for b_idx, last_pos in enumerate(last_token_positions):
+                modified_hider_acts[b_idx, last_pos, :] = last_token_hider_acts[b_idx] - removal_vectors[b_idx]
+        else:
+            raise ValueError(f"Unsupported removal_mode: {removal_mode}")
         target_activations = {config.active_layer: modified_hider_acts}
 
         seq_len = int(inputs_BL["input_ids"].shape[1])
@@ -334,6 +395,8 @@ def run_global_feature_verbalizer(
                 "selected_layer_percent": config.selected_layer_percent,
                 "active_layer": config.active_layer,
                 "feature_subtract_scale": feature_subtract_scale,
+                "removal_mode": removal_mode,
+                "last_token_projection": float(last_token_projections[b_idx].item()),
             }
             verbalizer_inputs.extend(
                 base_experiment.create_verbalizer_inputs(
@@ -385,6 +448,8 @@ def run_global_feature_verbalizer(
                     "selected_layer_percent": meta["selected_layer_percent"],
                     "active_layer": meta["active_layer"],
                     "feature_subtract_scale": meta["feature_subtract_scale"],
+                    "removal_mode": meta["removal_mode"],
+                    "last_token_projection": meta["last_token_projection"],
                 }
             bucket = agg[key]
             dp_kind = meta["dp_kind"]
@@ -414,6 +479,8 @@ def run_global_feature_verbalizer(
                     "selected_layer_percent": bucket["selected_layer_percent"],
                     "active_layer": bucket["active_layer"],
                     "feature_subtract_scale": bucket["feature_subtract_scale"],
+                    "removal_mode": bucket["removal_mode"],
+                    "last_token_projection": bucket["last_token_projection"],
                 }
             )
 
@@ -447,6 +514,7 @@ def main() -> None:
     )
     parser.add_argument("--intervention_scale", type=float, default=1.0)
     parser.add_argument("--feature_source", type=str, default="hider_guesser", choices=["hider_guesser", "hider_base"])
+    parser.add_argument("--removal_mode", type=str, default="global_scale", choices=["global_scale", "per_sample_projection"])
     parser.add_argument("--target_words", type=str, nargs="+", default=None)
     parser.add_argument("--max_context_prompts", type=int, default=None)
     parser.add_argument("--output_dir", type=str, default="./taboo_eval_results")
@@ -560,6 +628,7 @@ def main() -> None:
                     config=config,
                     device=device,
                     feature_subtract_scale=args.intervention_scale,
+                    removal_mode=args.removal_mode,
                 )
                 verbalizer_results.extend(results)
 
@@ -581,7 +650,10 @@ def main() -> None:
                 "feature_application": "hider_activation_minus_scale_times_global_feature",
                 "feature_raw_norm": feature_info["feature_raw_norm"],
                 "feature_unit_norm": feature_info["feature_unit_norm"],
+                "projection_stats": feature_info["projection_stats"],
+                "projection_stats_by_word": feature_info["projection_stats_by_word"],
                 "feature_subtract_scale": args.intervention_scale,
+                "removal_mode": args.removal_mode,
                 "oracle_steering_coefficient": 1.0,
                 "verbalizer_lora_path": verbalizer_lora_path,
                 "hider_lora_template": hider_lora_template,
@@ -597,7 +669,7 @@ def main() -> None:
                 model.delete_adapter(sanitized_verbalizer_name)
 
             output_json = output_json_template.format(
-                lora=f"{lora_name}_layer_{selected_layer_percent}_{args.verbalize_prompt}_{args.feature_source}"
+                lora=f"{lora_name}_layer_{selected_layer_percent}_{args.verbalize_prompt}_{args.feature_source}_{args.removal_mode}"
             )
             with open(output_json, "w", encoding="utf-8") as f:
                 json.dump(final_results, f, indent=2)
