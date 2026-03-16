@@ -62,7 +62,7 @@ def sanitize_lora_key(verbalizer_lora_path: str | None) -> str:
 
 def annotate_bar_values(ax, bar_container, values: list[float]) -> None:
     labels = [f"{value:.3f}" for value in values]
-    ax.bar_label(bar_container, labels=labels, padding=3, fontsize=8, rotation=180)
+    ax.bar_label(bar_container, labels=labels, padding=3, fontsize=8, rotation=0)
 
 
 def load_layered_results(
