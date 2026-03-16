@@ -149,6 +149,24 @@ def collect_acts_for_adapter(
     return acts_by_layer[active_layer]
 
 
+def collect_base_acts(
+    model: AutoModelForCausalLM,
+    inputs_BL: dict[str, torch.Tensor],
+    active_layer: int,
+) -> torch.Tensor:
+    model.disable_adapters()
+    submodule = get_hf_submodule(model, active_layer)
+    acts_by_layer = collect_activations_multiple_layers(
+        model=model,
+        submodules={active_layer: submodule},
+        inputs_BL=inputs_BL,
+        min_offset=None,
+        max_offset=None,
+    )
+    model.enable_adapters()
+    return acts_by_layer[active_layer]
+
+
 def extract_last_token_acts(acts_BLD: torch.Tensor, inputs_BL: dict[str, torch.Tensor]) -> torch.Tensor:
     seq_len = int(inputs_BL["input_ids"].shape[1])
     gathered = []
@@ -172,6 +190,7 @@ def compute_global_role_difference_feature(
     hider_lora_template: str,
     guesser_lora_template: str,
     feature_batch_size: int,
+    feature_source: str,
 ) -> dict[str, Any]:
     config = base_experiment.VerbalizerEvalConfig(
         model_name=model_name,
@@ -187,15 +206,16 @@ def compute_global_role_difference_feature(
 
     for target_word in target_words:
         hider_lora_path = hider_lora_template.format(lora_path=target_word)
-        guesser_lora_path = guesser_lora_template.format(lora_path=target_word)
-        if not guesser_lora_path.startswith("adamkarvonen/") and not guesser_lora_path.startswith("bcywinski/"):
-            assert Path(guesser_lora_path).exists(), f"Guesser LoRA path does not exist: {guesser_lora_path}"
-
         hider_adapter_name = base_experiment.load_lora_adapter(model, hider_lora_path)
-        guesser_adapter_name = base_experiment.load_lora_adapter(model, guesser_lora_path)
+        guesser_adapter_name = None
+        if feature_source == "hider_guesser":
+            guesser_lora_path = guesser_lora_template.format(lora_path=target_word)
+            if not guesser_lora_path.startswith("adamkarvonen/") and not guesser_lora_path.startswith("bcywinski/"):
+                assert Path(guesser_lora_path).exists(), f"Guesser LoRA path does not exist: {guesser_lora_path}"
+            guesser_adapter_name = base_experiment.load_lora_adapter(model, guesser_lora_path)
 
         hider_batches = []
-        guesser_batches = []
+        contrast_batches = []
         for start in range(0, len(context_prompts), feature_batch_size):
             batch_prompts = context_prompts[start : start + feature_batch_size]
             message_dicts = [[{"role": "user", "content": prompt}] for prompt in batch_prompts]
@@ -213,21 +233,30 @@ def compute_global_role_difference_feature(
                 active_layer=config.active_layer,
                 adapter_name=hider_adapter_name,
             )
-            guesser_acts = collect_acts_for_adapter(
-                model=model,
-                inputs_BL=inputs_BL,
-                active_layer=config.active_layer,
-                adapter_name=guesser_adapter_name,
-            )
+            if feature_source == "hider_guesser":
+                contrast_acts = collect_acts_for_adapter(
+                    model=model,
+                    inputs_BL=inputs_BL,
+                    active_layer=config.active_layer,
+                    adapter_name=guesser_adapter_name,
+                )
+            elif feature_source == "hider_base":
+                contrast_acts = collect_base_acts(
+                    model=model,
+                    inputs_BL=inputs_BL,
+                    active_layer=config.active_layer,
+                )
+            else:
+                raise ValueError(f"Unsupported feature_source: {feature_source}")
 
             hider_batches.append(extract_last_token_acts(hider_acts, inputs_BL))
-            guesser_batches.append(extract_last_token_acts(guesser_acts, inputs_BL))
+            contrast_batches.append(extract_last_token_acts(contrast_acts, inputs_BL))
 
         hider_mean = torch.cat(hider_batches, dim=0).mean(dim=0)
-        guesser_mean = torch.cat(guesser_batches, dim=0).mean(dim=0)
-        word_differences.append(hider_mean - guesser_mean)
+        contrast_mean = torch.cat(contrast_batches, dim=0).mean(dim=0)
+        word_differences.append(hider_mean - contrast_mean)
 
-        if guesser_adapter_name in model.peft_config:
+        if guesser_adapter_name is not None and guesser_adapter_name in model.peft_config:
             model.delete_adapter(guesser_adapter_name)
         if hider_adapter_name in model.peft_config:
             model.delete_adapter(hider_adapter_name)
@@ -417,6 +446,7 @@ def main() -> None:
         choices=["secret_word", "concept", "intent", "concept_intent"],
     )
     parser.add_argument("--intervention_scale", type=float, default=1.0)
+    parser.add_argument("--feature_source", type=str, default="hider_guesser", choices=["hider_guesser", "hider_base"])
     parser.add_argument("--target_words", type=str, nargs="+", default=None)
     parser.add_argument("--max_context_prompts", type=int, default=None)
     parser.add_argument("--output_dir", type=str, default="./taboo_eval_results")
@@ -482,6 +512,7 @@ def main() -> None:
             hider_lora_template=hider_lora_template,
             guesser_lora_template=guesser_lora_template,
             feature_batch_size=args.feature_batch_size,
+            feature_source=args.feature_source,
         )
         config = feature_info["config"]
         config.eval_batch_size = args.eval_batch_size
@@ -539,7 +570,12 @@ def main() -> None:
 
             final_results = {
                 "config": asdict(config),
-                "feature_source": "mean_over_words(mean(hider_word_activation) - mean(guesser_word_activation))",
+                "feature_source": args.feature_source,
+                "feature_formula": (
+                    "mean_over_words(mean(hider_word_activation) - mean(guesser_word_activation))"
+                    if args.feature_source == "hider_guesser"
+                    else "mean_over_words(mean(hider_word_activation) - mean(base_word_activation))"
+                ),
                 "feature_position": "last_token_of_context_prompt",
                 "feature_normalization": "unit_vector_after_global_mean",
                 "feature_application": "hider_activation_minus_scale_times_global_feature",
@@ -561,7 +597,7 @@ def main() -> None:
                 model.delete_adapter(sanitized_verbalizer_name)
 
             output_json = output_json_template.format(
-                lora=f"{lora_name}_layer_{selected_layer_percent}_{args.verbalize_prompt}"
+                lora=f"{lora_name}_layer_{selected_layer_percent}_{args.verbalize_prompt}_{args.feature_source}"
             )
             with open(output_json, "w", encoding="utf-8") as f:
                 json.dump(final_results, f, indent=2)
