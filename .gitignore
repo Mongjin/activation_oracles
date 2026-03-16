@@ -201,3 +201,4 @@ nl_probes/trl_training/runs/*
 nl_probes/trl_training/sft_outputs/*
 *shot*
 *intervention*
+*base_model*
