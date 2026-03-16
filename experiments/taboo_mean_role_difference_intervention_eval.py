@@ -15,7 +15,7 @@ import nl_probes.base_experiment as base_experiment
 from nl_probes.base_experiment import VerbalizerInputInfo
 from nl_probes.utils.activation_utils import collect_activations_multiple_layers, get_hf_submodule
 from nl_probes.utils.common import load_model, load_tokenizer
-from nl_probes.utils.dataset_utils import TrainingDataPoint, create_training_datapoint
+from nl_probes.utils.dataset_utils import TrainingDataPoint
 from nl_probes.utils.eval import run_evaluation
 
 
@@ -244,106 +244,17 @@ def compute_global_role_difference_feature(
     }
 
 
-def create_fixed_feature_inputs(
-    feature_unit_D: torch.Tensor,
-    context_input_ids: list[int],
-    verbalizer_prompt: str,
-    config: base_experiment.VerbalizerEvalConfig,
-    tokenizer: AutoTokenizer,
-    base_meta: dict[str, Any],
-) -> list[TrainingDataPoint]:
-    training_data: list[TrainingDataPoint] = []
-    feature_unit_D = feature_unit_D.detach().cpu()
-
-    if "tokens" in config.verbalizer_input_types:
-        if config.token_start_idx < 0:
-            token_start = len(context_input_ids) + config.token_start_idx
-            token_end = len(context_input_ids) + config.token_end_idx
-        else:
-            token_start = config.token_start_idx
-            token_end = config.token_end_idx
-        for i in range(token_start, token_end):
-            meta = {"dp_kind": "tokens", "token_index": i}
-            meta.update(base_meta)
-            training_data.append(
-                create_training_datapoint(
-                    datapoint_type="N/A",
-                    prompt=verbalizer_prompt,
-                    target_response="N/A",
-                    layer=config.active_layer,
-                    num_positions=1,
-                    tokenizer=tokenizer,
-                    acts_BD=feature_unit_D.unsqueeze(0),
-                    feature_idx=-1,
-                    context_input_ids=context_input_ids,
-                    context_positions=[i],
-                    ds_label="N/A",
-                    meta_info=meta,
-                )
-            )
-
-    if "segment" in config.verbalizer_input_types:
-        if config.segment_start_idx < 0:
-            segment_start = len(context_input_ids) + config.segment_start_idx
-            segment_end = len(context_input_ids) + config.segment_end_idx
-        else:
-            segment_start = config.segment_start_idx
-            segment_end = config.segment_end_idx
-        segment_positions = list(range(segment_start, segment_end))
-        for _ in range(config.segment_repeats):
-            meta = {"dp_kind": "segment"}
-            meta.update(base_meta)
-            training_data.append(
-                create_training_datapoint(
-                    datapoint_type="N/A",
-                    prompt=verbalizer_prompt,
-                    target_response="N/A",
-                    layer=config.active_layer,
-                    num_positions=len(segment_positions),
-                    tokenizer=tokenizer,
-                    acts_BD=feature_unit_D.unsqueeze(0).repeat(len(segment_positions), 1),
-                    feature_idx=-1,
-                    context_input_ids=context_input_ids,
-                    context_positions=segment_positions,
-                    ds_label="N/A",
-                    meta_info=meta,
-                )
-            )
-
-    if "full_seq" in config.verbalizer_input_types:
-        full_positions = list(range(len(context_input_ids)))
-        for _ in range(config.full_seq_repeats):
-            meta = {"dp_kind": "full_seq"}
-            meta.update(base_meta)
-            training_data.append(
-                create_training_datapoint(
-                    datapoint_type="N/A",
-                    prompt=verbalizer_prompt,
-                    target_response="N/A",
-                    layer=config.active_layer,
-                    num_positions=len(full_positions),
-                    tokenizer=tokenizer,
-                    acts_BD=feature_unit_D.unsqueeze(0).repeat(len(full_positions), 1),
-                    feature_idx=-1,
-                    context_input_ids=context_input_ids,
-                    context_positions=full_positions,
-                    ds_label="N/A",
-                    meta_info=meta,
-                )
-            )
-
-    return training_data
-
-
 def run_global_feature_verbalizer(
     model: AutoModelForCausalLM,
     tokenizer: AutoTokenizer,
     verbalizer_prompt_infos: list[VerbalizerInputInfo],
     verbalizer_lora_path: Optional[str],
+    hider_adapter_name: str,
+    hider_lora_path: str,
     feature_unit_D: torch.Tensor,
     config: base_experiment.VerbalizerEvalConfig,
     device: torch.device,
-    steering_coefficient: float,
+    feature_subtract_scale: float,
 ) -> list[dict[str, Any]]:
     dtype = torch.bfloat16
     injection_submodule = get_hf_submodule(model, config.injection_layer)
@@ -361,6 +272,16 @@ def run_global_feature_verbalizer(
             device=device,
         )
 
+        hider_acts = collect_acts_for_adapter(
+            model=model,
+            inputs_BL=inputs_BL,
+            active_layer=config.active_layer,
+            adapter_name=hider_adapter_name,
+        )
+        feature_shift = (feature_unit_D.to(hider_acts.device, hider_acts.dtype) * feature_subtract_scale).view(1, 1, -1)
+        modified_hider_acts = hider_acts - feature_shift
+        target_activations = {config.active_layer: modified_hider_acts}
+
         seq_len = int(inputs_BL["input_ids"].shape[1])
         context_input_ids_list = []
         verbalizer_inputs: list[TrainingDataPoint] = []
@@ -373,6 +294,7 @@ def run_global_feature_verbalizer(
             context_input_ids_list.append(context_input_ids)
 
             base_meta = {
+                "hider_lora_path": hider_lora_path,
                 "context_prompt": info.context_prompt,
                 "verbalizer_prompt": info.verbalizer_prompt,
                 "ground_truth": info.ground_truth,
@@ -382,14 +304,19 @@ def run_global_feature_verbalizer(
                 "context_index_within_batch": b_idx,
                 "selected_layer_percent": config.selected_layer_percent,
                 "active_layer": config.active_layer,
+                "feature_subtract_scale": feature_subtract_scale,
             }
             verbalizer_inputs.extend(
-                create_fixed_feature_inputs(
-                    feature_unit_D=feature_unit_D,
+                base_experiment.create_verbalizer_inputs(
+                    acts_BLD_by_layer_dict=target_activations,
                     context_input_ids=context_input_ids,
                     verbalizer_prompt=info.verbalizer_prompt,
-                    config=config,
+                    act_layer=config.active_layer,
+                    prompt_layer=config.active_layer,
                     tokenizer=tokenizer,
+                    config=config,
+                    batch_idx=b_idx,
+                    left_pad=left_pad,
                     base_meta=base_meta,
                 )
             )
@@ -407,7 +334,7 @@ def run_global_feature_verbalizer(
             global_step=-1,
             lora_path=verbalizer_lora_path,
             eval_batch_size=config.eval_batch_size,
-            steering_coefficient=steering_coefficient,
+            steering_coefficient=1.0,
             generation_kwargs=config.verbalizer_generation_kwargs,
         )
 
@@ -417,6 +344,7 @@ def run_global_feature_verbalizer(
             key = (meta["act_key"], int(meta["combo_index"]))
             if key not in agg:
                 agg[key] = {
+                    "hider_lora_path": meta["hider_lora_path"],
                     "context_prompt": meta["context_prompt"],
                     "verbalizer_prompt": meta["verbalizer_prompt"],
                     "ground_truth": meta["ground_truth"],
@@ -427,6 +355,7 @@ def run_global_feature_verbalizer(
                     "full_sequence_responses": [],
                     "selected_layer_percent": meta["selected_layer_percent"],
                     "active_layer": meta["active_layer"],
+                    "feature_subtract_scale": meta["feature_subtract_scale"],
                 }
             bucket = agg[key]
             dp_kind = meta["dp_kind"]
@@ -443,6 +372,7 @@ def run_global_feature_verbalizer(
             results.append(
                 {
                     "verbalizer_lora_path": verbalizer_lora_path,
+                    "hider_lora_path": bucket["hider_lora_path"],
                     "context_prompt": bucket["context_prompt"],
                     "act_key": act_key,
                     "verbalizer_prompt": bucket["verbalizer_prompt"],
@@ -454,6 +384,7 @@ def run_global_feature_verbalizer(
                     "context_input_ids": context_input_ids_list[bucket["context_index_within_batch"]],
                     "selected_layer_percent": bucket["selected_layer_percent"],
                     "active_layer": bucket["active_layer"],
+                    "feature_subtract_scale": bucket["feature_subtract_scale"],
                 }
             )
 
@@ -536,13 +467,7 @@ def main() -> None:
     dummy_config = LoraConfig()
     model.add_adapter(dummy_config, adapter_name="default")
 
-    verbalizer_prompt_infos = build_verbalizer_prompt_infos(
-        target_words=target_words,
-        context_prompts=context_prompts,
-        verbalizer_prompts=verbalizer_prompts,
-    )
-
-    total_combos = len(args.layer_percents) * len(verbalizer_lora_paths)
+    total_combos = len(args.layer_percents) * len(verbalizer_lora_paths) * len(target_words)
     combo_pbar = tqdm(total=total_combos, desc="Mean role-difference intervention eval", position=0)
 
     for selected_layer_percent in args.layer_percents:
@@ -570,41 +495,63 @@ def main() -> None:
         config.segment_repeats = 1
 
         for verbalizer_lora_path in verbalizer_lora_paths:
+            verbalizer_results: list[dict[str, Any]] = []
             sanitized_verbalizer_name = None
             if verbalizer_lora_path is not None:
                 sanitized_verbalizer_name = base_experiment.load_lora_adapter(model, verbalizer_lora_path)
 
-            combo_pbar.set_postfix(
-                {
-                    "layer": selected_layer_percent,
-                    "oracle": verbalizer_lora_path.split("/")[-1] if verbalizer_lora_path else "base_model",
-                }
-            )
+            for target_word in target_words:
+                hider_lora_path = hider_lora_template.format(lora_path=target_word)
+                hider_adapter_name = base_experiment.load_lora_adapter(model, hider_lora_path)
 
-            results = run_global_feature_verbalizer(
-                model=model,
-                tokenizer=tokenizer,
-                verbalizer_prompt_infos=verbalizer_prompt_infos,
-                verbalizer_lora_path=verbalizer_lora_path,
-                feature_unit_D=feature_info["feature_unit"],
-                config=config,
-                device=device,
-                steering_coefficient=args.intervention_scale,
-            )
+                combo_pbar.set_postfix(
+                    {
+                        "layer": selected_layer_percent,
+                        "oracle": verbalizer_lora_path.split("/")[-1] if verbalizer_lora_path else "base_model",
+                        "target": target_word,
+                    }
+                )
+
+                verbalizer_prompt_infos = build_verbalizer_prompt_infos(
+                    target_words=[target_word],
+                    context_prompts=context_prompts,
+                    verbalizer_prompts=verbalizer_prompts,
+                )
+
+                results = run_global_feature_verbalizer(
+                    model=model,
+                    tokenizer=tokenizer,
+                    verbalizer_prompt_infos=verbalizer_prompt_infos,
+                    verbalizer_lora_path=verbalizer_lora_path,
+                    hider_adapter_name=hider_adapter_name,
+                    hider_lora_path=hider_lora_path,
+                    feature_unit_D=feature_info["feature_unit"],
+                    config=config,
+                    device=device,
+                    feature_subtract_scale=args.intervention_scale,
+                )
+                verbalizer_results.extend(results)
+
+                if hider_adapter_name in model.peft_config:
+                    model.delete_adapter(hider_adapter_name)
+
+                combo_pbar.update(1)
 
             final_results = {
                 "config": asdict(config),
                 "feature_source": "mean_over_words(mean(hider_word_activation) - mean(guesser_word_activation))",
                 "feature_position": "last_token_of_context_prompt",
                 "feature_normalization": "unit_vector_after_global_mean",
+                "feature_application": "hider_activation_minus_scale_times_global_feature",
                 "feature_raw_norm": feature_info["feature_raw_norm"],
                 "feature_unit_norm": feature_info["feature_unit_norm"],
-                "intervention_scale": args.intervention_scale,
+                "feature_subtract_scale": args.intervention_scale,
+                "oracle_steering_coefficient": 1.0,
                 "verbalizer_lora_path": verbalizer_lora_path,
                 "hider_lora_template": hider_lora_template,
                 "guesser_lora_template": guesser_lora_template,
                 "target_words": target_words,
-                "results": results,
+                "results": verbalizer_results,
             }
 
             if verbalizer_lora_path is None:
@@ -619,8 +566,6 @@ def main() -> None:
             with open(output_json, "w", encoding="utf-8") as f:
                 json.dump(final_results, f, indent=2)
             print(f"Saved results to {output_json}")
-
-            combo_pbar.update(1)
 
     combo_pbar.close()
 
