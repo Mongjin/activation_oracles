@@ -60,6 +60,11 @@ def sanitize_lora_key(verbalizer_lora_path: str | None) -> str:
     return verbalizer_lora_path.split("/")[-1]
 
 
+def annotate_bar_values(ax, bar_container, values: list[float]) -> None:
+    labels = [f"{value:.3f}" for value in values]
+    ax.bar_label(bar_container, labels=labels, padding=3, fontsize=8, rotation=90)
+
+
 def load_layered_results(
     json_dir: Path,
     sequence: bool,
@@ -150,7 +155,7 @@ def plot_layer_comparison(records_by_lora_layer, output_path: Path, sequence: bo
             means.append(float(np.mean(vals)))
             cis.append(calculate_ci_margin(vals))
 
-        ax.bar(
+        bars = ax.bar(
             x + offsets[lp],
             means,
             width,
@@ -160,6 +165,7 @@ def plot_layer_comparison(records_by_lora_layer, output_path: Path, sequence: bo
             label=f"Layer {lp}%",
             alpha=0.9,
         )
+        annotate_bar_values(ax, bars, means)
 
     pretty_labels = [CUSTOM_LABELS.get(k, k) for k in lora_keys]
 
@@ -221,7 +227,7 @@ def plot_activation_source_comparison(
             means_b.append(float(np.mean(vals_b)))
             cis_b.append(calculate_ci_margin(vals_b))
 
-        ax.bar(
+        bars_a = ax.bar(
             x - width / 2,
             means_a,
             width,
@@ -231,7 +237,7 @@ def plot_activation_source_comparison(
             label=f"Activation: {act_a}",
             alpha=0.9,
         )
-        ax.bar(
+        bars_b = ax.bar(
             x + width / 2,
             means_b,
             width,
@@ -241,6 +247,8 @@ def plot_activation_source_comparison(
             label=f"Activation: {act_b}",
             alpha=0.9,
         )
+        annotate_bar_values(ax, bars_a, means_a)
+        annotate_bar_values(ax, bars_b, means_b)
 
         pretty_labels = [CUSTOM_LABELS.get(k, k) for k in lora_keys]
         ax.set_xticks(x)
