@@ -376,12 +376,12 @@ def run_global_feature_verbalizer(
             )
             for b_idx, last_pos in enumerate(last_token_positions):
                 modified_hider_acts[b_idx, last_pos, :] = last_token_hider_acts[b_idx] - removal_vectors[b_idx]
-            cos_sim = torch.nn.functional.cosine_similarity(
-                                                            last_token_hider_acts, 
-                                                            modified_hider_acts, 
-                                                            dim=-1
-                                                            )
-            print(f"Cosine similarity before/after intervention - mean: {cos_sim.mean():.6f}")
+                cos_sim = torch.nn.functional.cosine_similarity(
+                                                                last_token_hider_acts[b_idx], 
+                                                                modified_hider_acts[b_idx, last_pos, :], 
+                                                                dim=-1
+                                                                )
+                print(f"Cosine similarity before/after intervention - mean: {cos_sim.mean():.6f}")
         else:
             raise ValueError(f"Unsupported removal_mode: {removal_mode}")
         target_activations = {config.active_layer: modified_hider_acts}
