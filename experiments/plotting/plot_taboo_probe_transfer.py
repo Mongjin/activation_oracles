@@ -149,7 +149,7 @@ def draw_transfer_plot(
                     ax.set_ylabel("Score")
 
     handles, labels = axes[0][0].get_legend_handles_labels() if n_rows > 1 else axes[0].get_legend_handles_labels()
-    fig.legend(handles, labels, loc="upper center", ncol=4, bbox_to_anchor=(0.5, 0.98))
+    fig.legend(handles, labels, loc="upper center", ncol=4, bbox_to_anchor=(0.5, 0.95))
 
     os.makedirs(os.path.dirname(output_path), exist_ok=True)
 
