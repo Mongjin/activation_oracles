@@ -62,6 +62,8 @@ class HiderActivationSimilarityConfig:
     max_prompts: Optional[int]
     target_lora_suffixes: list[str]
     target_lora_path_template: str
+    guesser_lora_path_template: Optional[str]
+    analysis_modes: list[str]
 
 
 def infer_target_lora_path_template(model_name: str) -> str:
@@ -70,6 +72,11 @@ def infer_target_lora_path_template(model_name: str) -> str:
     if model_name == "google/gemma-2-9b-it":
         return "bcywinski/gemma-2-9b-it-taboo-{lora_path}"
     raise ValueError(f"Unsupported model_name: {model_name}")
+
+
+def infer_guesser_lora_path_template(model_name: str) -> str:
+    model_suffix = model_name.split("/")[-1]
+    return f"/home/mongjin/activation_oracles/nl_probes/trl_training/model_lora_role_swapped/{model_suffix}-taboo-{{lora_path}}-role-swapped"
 
 
 def load_context_prompts(prompt_type: str, dataset_type: str, lang_type: Optional[str]) -> list[str]:
@@ -179,6 +186,53 @@ def collect_target_word_activations(
     return {layer: torch.cat(chunks, dim=0) for layer, chunks in pooled_by_layer.items()}
 
 
+def collect_base_activations(
+    model,
+    tokenizer,
+    context_prompts: list[str],
+    act_layers: list[int],
+    config: HiderActivationSimilarityConfig,
+    device: torch.device,
+) -> dict[int, torch.Tensor]:
+    model.disable_adapters()
+
+    submodules = {layer: get_hf_submodule(model, layer) for layer in act_layers}
+    pooled_by_layer = {layer: [] for layer in act_layers}
+
+    for start in range(0, len(context_prompts), config.eval_batch_size):
+        batch_prompts = context_prompts[start : start + config.eval_batch_size]
+        batch_messages = [[{"role": "user", "content": prompt}] for prompt in batch_prompts]
+
+        inputs_BL = base_experiment.encode_messages(
+            tokenizer=tokenizer,
+            message_dicts=batch_messages,
+            add_generation_prompt=config.add_generation_prompt,
+            enable_thinking=config.enable_thinking,
+            device=device,
+        )
+
+        acts_by_layer = collect_activations_multiple_layers(
+            model=model,
+            submodules=submodules,
+            inputs_BL=inputs_BL,
+            min_offset=None,
+            max_offset=None,
+        )
+
+        for layer in act_layers:
+            pooled_BD = pool_batch_activations(
+                acts_BLD=acts_by_layer[layer],
+                attention_mask_BL=inputs_BL["attention_mask"],
+                pooling=config.pooling,
+                segment_start_idx=config.segment_start_idx,
+                segment_end_idx=config.segment_end_idx,
+            )
+            pooled_by_layer[layer].append(pooled_BD.cpu())
+
+    model.enable_adapters()
+    return {layer: torch.cat(chunks, dim=0) for layer, chunks in pooled_by_layer.items()}
+
+
 def summarize_values(values: torch.Tensor) -> dict[str, float]:
     values = values.float()
     return {
@@ -268,6 +322,33 @@ def build_cosine_summary(
     return summary
 
 
+def build_difference_vectors(
+    hider_vectors: dict[str, dict[int, torch.Tensor]],
+    guesser_vectors: dict[str, dict[int, torch.Tensor]],
+    base_vectors: dict[int, torch.Tensor],
+    ordered_targets: list[str],
+    act_layers: list[int],
+    analysis_mode: str,
+) -> dict[str, dict[int, torch.Tensor]]:
+    per_target_difference_vectors: dict[str, dict[int, torch.Tensor]] = {}
+
+    for target in ordered_targets:
+        per_target_difference_vectors[target] = {}
+        for act_layer in act_layers:
+            if analysis_mode == "hider_minus_guesser":
+                per_target_difference_vectors[target][act_layer] = (
+                    hider_vectors[target][act_layer] - guesser_vectors[target][act_layer]
+                )
+            elif analysis_mode == "hider_minus_base":
+                per_target_difference_vectors[target][act_layer] = (
+                    hider_vectors[target][act_layer] - base_vectors[act_layer]
+                )
+            else:
+                raise ValueError(f"Unsupported analysis_mode: {analysis_mode}")
+
+    return per_target_difference_vectors
+
+
 def write_cosine_csv(
     output_path: Path,
     target_words: list[str],
@@ -299,6 +380,14 @@ if __name__ == "__main__":
     parser.add_argument("--max_prompts", type=int, default=None)
     parser.add_argument("--target_lora_suffixes", type=str, nargs="+", default=None)
     parser.add_argument("--target_lora_path_template", type=str, default=None)
+    parser.add_argument("--guesser_lora_path_template", type=str, default=None)
+    parser.add_argument(
+        "--analysis_modes",
+        type=str,
+        nargs="+",
+        default=["hider_minus_guesser", "hider_minus_base"],
+        choices=["hider_minus_guesser", "hider_minus_base"],
+    )
     parser.add_argument("--output_dir", type=str, default="./taboo_eval_results")
     args = parser.parse_args()
 
@@ -308,6 +397,7 @@ if __name__ == "__main__":
 
     target_lora_suffixes = args.target_lora_suffixes or DEFAULT_TARGET_LORA_SUFFIXES
     target_lora_path_template = args.target_lora_path_template or infer_target_lora_path_template(args.model_name)
+    guesser_lora_path_template = args.guesser_lora_path_template or infer_guesser_lora_path_template(args.model_name)
 
     config = HiderActivationSimilarityConfig(
         model_name=args.model_name,
@@ -324,6 +414,8 @@ if __name__ == "__main__":
         max_prompts=args.max_prompts,
         target_lora_suffixes=target_lora_suffixes,
         target_lora_path_template=target_lora_path_template,
+        guesser_lora_path_template=guesser_lora_path_template,
+        analysis_modes=args.analysis_modes,
     )
 
     context_prompts = load_context_prompts(config.prompt_type, config.dataset_type, config.lang_type)
@@ -352,70 +444,110 @@ if __name__ == "__main__":
     dummy_config = LoraConfig()
     model.add_adapter(dummy_config, adapter_name="default")
 
-    per_target_vectors: dict[str, dict[int, torch.Tensor]] = {}
+    print("Collecting base activations")
+    base_vectors = collect_base_activations(
+        model=model,
+        tokenizer=tokenizer,
+        context_prompts=context_prompts,
+        act_layers=act_layers,
+        config=config,
+        device=device,
+    )
 
-    pbar = tqdm(total=len(config.target_lora_suffixes), desc="Collect hider activations")
+    per_target_hider_vectors: dict[str, dict[int, torch.Tensor]] = {}
+    per_target_guesser_vectors: dict[str, dict[int, torch.Tensor]] = {}
+
+    pbar = tqdm(total=len(config.target_lora_suffixes), desc="Collect hider/guesser activations")
     for target_word in config.target_lora_suffixes:
         target_lora_path = config.target_lora_path_template.format(lora_path=target_word)
-        adapter_name = base_experiment.load_lora_adapter(model, target_lora_path)
+        hider_adapter_name = base_experiment.load_lora_adapter(model, target_lora_path)
 
-        per_target_vectors[target_word] = collect_target_word_activations(
+        per_target_hider_vectors[target_word] = collect_target_word_activations(
             model=model,
             tokenizer=tokenizer,
             context_prompts=context_prompts,
-            adapter_name=adapter_name,
+            adapter_name=hider_adapter_name,
             act_layers=act_layers,
             config=config,
             device=device,
         )
 
-        if adapter_name in model.peft_config:
-            model.delete_adapter(adapter_name)
+        if hider_adapter_name in model.peft_config:
+            model.delete_adapter(hider_adapter_name)
+
+        guesser_lora_path = config.guesser_lora_path_template.format(lora_path=target_word)
+        guesser_adapter_name = base_experiment.load_lora_adapter(model, guesser_lora_path)
+
+        per_target_guesser_vectors[target_word] = collect_target_word_activations(
+            model=model,
+            tokenizer=tokenizer,
+            context_prompts=context_prompts,
+            adapter_name=guesser_adapter_name,
+            act_layers=act_layers,
+            config=config,
+            device=device,
+        )
+
+        if guesser_adapter_name in model.peft_config:
+            model.delete_adapter(guesser_adapter_name)
 
         pbar.set_postfix({"target": target_word})
         pbar.update(1)
 
     pbar.close()
 
-    cosine_summary = build_cosine_summary(
-        per_target_vectors=per_target_vectors,
-        layer_percents=config.layer_percents,
-        act_layers=act_layers,
-        ordered_targets=config.target_lora_suffixes,
-        context_prompts=context_prompts,
-    )
-
     torch.save(
         {
             "config": asdict(config),
             "act_layers": act_layers,
-            "per_target_vectors": per_target_vectors,
+            "base_vectors": base_vectors,
+            "per_target_hider_vectors": per_target_hider_vectors,
+            "per_target_guesser_vectors": per_target_guesser_vectors,
         },
         output_dir / "pooled_hider_activations.pt",
     )
+
+    all_mode_summaries = {}
+    for analysis_mode in config.analysis_modes:
+        difference_vectors = build_difference_vectors(
+            hider_vectors=per_target_hider_vectors,
+            guesser_vectors=per_target_guesser_vectors,
+            base_vectors=base_vectors,
+            ordered_targets=config.target_lora_suffixes,
+            act_layers=act_layers,
+            analysis_mode=analysis_mode,
+        )
+        cosine_summary = build_cosine_summary(
+            per_target_vectors=difference_vectors,
+            layer_percents=config.layer_percents,
+            act_layers=act_layers,
+            ordered_targets=config.target_lora_suffixes,
+            context_prompts=context_prompts,
+        )
+        all_mode_summaries[analysis_mode] = cosine_summary
+
+        for layer_percent, layer_info in cosine_summary.items():
+            write_cosine_csv(
+                output_path=output_dir / f"{analysis_mode}_same_prompt_cosine_mean_layer_{layer_percent}.csv",
+                target_words=layer_info["target_words"],
+                cosine_matrix=layer_info["same_prompt_cosine_mean_matrix"],
+            )
+            write_cosine_csv(
+                output_path=output_dir / f"{analysis_mode}_same_prompt_cosine_std_layer_{layer_percent}.csv",
+                target_words=layer_info["target_words"],
+                cosine_matrix=layer_info["same_prompt_cosine_std_matrix"],
+            )
 
     with open(output_dir / "cosine_similarity_summary.json", "w", encoding="utf-8") as f:
         json.dump(
             {
                 "config": asdict(config),
                 "act_layers": act_layers,
-                "layers": cosine_summary,
+                "analysis_modes": all_mode_summaries,
             },
             f,
             ensure_ascii=False,
             indent=2,
-        )
-
-    for layer_percent, layer_info in cosine_summary.items():
-        write_cosine_csv(
-            output_path=output_dir / f"same_prompt_cosine_mean_layer_{layer_percent}.csv",
-            target_words=layer_info["target_words"],
-            cosine_matrix=layer_info["same_prompt_cosine_mean_matrix"],
-        )
-        write_cosine_csv(
-            output_path=output_dir / f"same_prompt_cosine_std_layer_{layer_percent}.csv",
-            target_words=layer_info["target_words"],
-            cosine_matrix=layer_info["same_prompt_cosine_std_matrix"],
         )
 
     print(f"Saved pooled activations and cosine similarities to {output_dir}")
