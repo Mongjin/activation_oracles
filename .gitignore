@@ -202,3 +202,5 @@ nl_probes/trl_training/sft_outputs/*
 *shot*
 *intervention*
 *base_model*
+experiments/taboo_eval_results/taboo_probe*
+experiments/taboo_eval_results/*hider_activation_cosine*
