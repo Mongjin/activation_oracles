@@ -238,7 +238,7 @@ def main() -> None:
     parser.add_argument(
         "--input_glob",
         type=str,
-        default="../taboo_eval_results/taboo_probe_bidirectional_*.json",
+        default="../taboo_eval_results/taboo_probe_bidirectional_gemma*.json",
     )
     parser.add_argument(
         "--output_dir",
