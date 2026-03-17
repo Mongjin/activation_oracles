@@ -179,44 +179,90 @@ def collect_target_word_activations(
     return {layer: torch.cat(chunks, dim=0) for layer, chunks in pooled_by_layer.items()}
 
 
+def summarize_values(values: torch.Tensor) -> dict[str, float]:
+    values = values.float()
+    return {
+        "count": int(values.numel()),
+        "mean": float(values.mean().item()),
+        "std": float(values.std(unbiased=False).item()),
+        "min": float(values.min().item()),
+        "max": float(values.max().item()),
+        "median": float(values.median().item()),
+    }
+
+
 def build_cosine_summary(
     per_target_vectors: dict[str, dict[int, torch.Tensor]],
     layer_percents: list[int],
     act_layers: list[int],
     ordered_targets: list[str],
+    context_prompts: list[str],
 ) -> dict[str, dict]:
     summary: dict[str, dict] = {}
 
     for layer_percent, act_layer in zip(layer_percents, act_layers):
-        target_mean_vectors = torch.stack(
-            [per_target_vectors[target][act_layer].mean(dim=0) for target in ordered_targets],
+        target_prompt_vectors = torch.stack(
+            [per_target_vectors[target][act_layer] for target in ordered_targets],
             dim=0,
         ).float()
+        normalized_prompt_vectors = F.normalize(target_prompt_vectors, dim=-1)
 
-        normalized_vectors = F.normalize(target_mean_vectors, dim=-1)
-        cosine_matrix = normalized_vectors @ normalized_vectors.T
+        prompt_major_vectors = normalized_prompt_vectors.permute(1, 0, 2)
+        prompt_cosine_matrices = torch.matmul(prompt_major_vectors, prompt_major_vectors.transpose(1, 2))
+        mean_cosine_matrix = prompt_cosine_matrices.mean(dim=0)
+        std_cosine_matrix = prompt_cosine_matrices.std(dim=0, unbiased=False)
 
         neighbors = {}
         for row_idx, target in enumerate(ordered_targets):
-            sorted_indices = torch.argsort(cosine_matrix[row_idx], descending=True).tolist()
+            sorted_indices = torch.argsort(mean_cosine_matrix[row_idx], descending=True).tolist()
             neighbors[target] = [
                 {
                     "target_word": ordered_targets[col_idx],
-                    "cosine_similarity": float(cosine_matrix[row_idx, col_idx].item()),
+                    "mean_cosine_similarity": float(mean_cosine_matrix[row_idx, col_idx].item()),
+                    "std_cosine_similarity": float(std_cosine_matrix[row_idx, col_idx].item()),
                 }
                 for col_idx in sorted_indices
                 if col_idx != row_idx
             ][:5]
 
+        same_prompt_pair_cosines = {}
+        for row_idx, row_target in enumerate(ordered_targets):
+            for col_idx in range(row_idx + 1, len(ordered_targets)):
+                col_target = ordered_targets[col_idx]
+                pair_key = f"{row_target}__{col_target}"
+                same_prompt_pair_cosines[pair_key] = prompt_cosine_matrices[:, row_idx, col_idx].tolist()
+
+        within_target_prompt_pairwise_stats = {}
+        prompt_to_centroid_cosines = {}
+        for target_idx, target in enumerate(ordered_targets):
+            target_vectors_PD = normalized_prompt_vectors[target_idx]
+            within_target_cosine = torch.matmul(target_vectors_PD, target_vectors_PD.T)
+            off_diag_mask = ~torch.eye(within_target_cosine.shape[0], dtype=torch.bool)
+            off_diag_values = within_target_cosine[off_diag_mask]
+
+            target_centroid_D = F.normalize(target_prompt_vectors[target_idx].mean(dim=0), dim=0)
+            target_prompt_to_centroid = torch.matmul(target_vectors_PD, target_centroid_D)
+
+            within_target_prompt_pairwise_stats[target] = {
+                "pairwise_prompt_cosine": summarize_values(off_diag_values),
+                "prompt_to_centroid_cosine": summarize_values(target_prompt_to_centroid),
+            }
+            prompt_to_centroid_cosines[target] = target_prompt_to_centroid.tolist()
+
         summary[str(layer_percent)] = {
             "layer_percent": layer_percent,
             "layer_index": act_layer,
             "target_words": ordered_targets,
+            "context_prompts": context_prompts,
             "num_prompts_per_target": {
                 target: int(per_target_vectors[target][act_layer].shape[0]) for target in ordered_targets
             },
-            "cosine_similarity_matrix": cosine_matrix.tolist(),
-            "top_neighbors": neighbors,
+            "same_prompt_cosine_mean_matrix": mean_cosine_matrix.tolist(),
+            "same_prompt_cosine_std_matrix": std_cosine_matrix.tolist(),
+            "same_prompt_pair_cosines": same_prompt_pair_cosines,
+            "top_neighbors_by_mean_same_prompt_cosine": neighbors,
+            "within_target_prompt_pairwise_stats": within_target_prompt_pairwise_stats,
+            "prompt_to_centroid_cosines": prompt_to_centroid_cosines,
         }
 
     return summary
@@ -336,6 +382,7 @@ if __name__ == "__main__":
         layer_percents=config.layer_percents,
         act_layers=act_layers,
         ordered_targets=config.target_lora_suffixes,
+        context_prompts=context_prompts,
     )
 
     torch.save(
@@ -361,9 +408,14 @@ if __name__ == "__main__":
 
     for layer_percent, layer_info in cosine_summary.items():
         write_cosine_csv(
-            output_path=output_dir / f"cosine_similarity_layer_{layer_percent}.csv",
+            output_path=output_dir / f"same_prompt_cosine_mean_layer_{layer_percent}.csv",
             target_words=layer_info["target_words"],
-            cosine_matrix=layer_info["cosine_similarity_matrix"],
+            cosine_matrix=layer_info["same_prompt_cosine_mean_matrix"],
+        )
+        write_cosine_csv(
+            output_path=output_dir / f"same_prompt_cosine_std_layer_{layer_percent}.csv",
+            target_words=layer_info["target_words"],
+            cosine_matrix=layer_info["same_prompt_cosine_std_matrix"],
         )
 
     print(f"Saved pooled activations and cosine similarities to {output_dir}")
