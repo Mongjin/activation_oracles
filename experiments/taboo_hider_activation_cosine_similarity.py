@@ -253,7 +253,7 @@ if __name__ == "__main__":
     parser.add_argument("--max_prompts", type=int, default=None)
     parser.add_argument("--target_lora_suffixes", type=str, nargs="+", default=None)
     parser.add_argument("--target_lora_path_template", type=str, default=None)
-    parser.add_argument("--output_dir", type=str, default="./taboo_eval_results/hider_activation_word_similarity")
+    parser.add_argument("--output_dir", type=str, default="./taboo_eval_results")
     args = parser.parse_args()
 
     random.seed(42)
