@@ -357,10 +357,18 @@ def run_global_feature_verbalizer(
             dim=0,
         )
         last_token_projections = torch.matmul(last_token_hider_acts, feature_unit_device)
+        hider_norms = last_token_hider_acts.norm(dim=-1)
+        print(f"Hider activation norm - mean: {hider_norms.mean():.1f}, median: {hider_norms.median():.1f}")
 
         if removal_mode == "global_scale":
             feature_shift = (feature_unit_device * feature_subtract_scale).view(1, 1, -1)
             modified_hider_acts = hider_acts - feature_shift
+            cos_sim = torch.nn.functional.cosine_similarity(
+                                                            hider_acts, 
+                                                            modified_hider_acts, 
+                                                            dim=-1
+                                                            )
+            print(f"Cosine similarity before/after intervention - mean: {cos_sim.mean():.6f}")
         elif removal_mode == "per_sample_projection":
             modified_hider_acts = hider_acts.clone()
             removal_vectors = (
@@ -368,6 +376,12 @@ def run_global_feature_verbalizer(
             )
             for b_idx, last_pos in enumerate(last_token_positions):
                 modified_hider_acts[b_idx, last_pos, :] = last_token_hider_acts[b_idx] - removal_vectors[b_idx]
+            cos_sim = torch.nn.functional.cosine_similarity(
+                                                            last_token_hider_acts, 
+                                                            modified_hider_acts, 
+                                                            dim=-1
+                                                            )
+            print(f"Cosine similarity before/after intervention - mean: {cos_sim.mean():.6f}")
         else:
             raise ValueError(f"Unsupported removal_mode: {removal_mode}")
         target_activations = {config.active_layer: modified_hider_acts}
@@ -624,7 +638,7 @@ def main() -> None:
                     verbalizer_lora_path=verbalizer_lora_path,
                     hider_adapter_name=hider_adapter_name,
                     hider_lora_path=hider_lora_path,
-                    feature_unit_D=feature_info["feature_raw"],
+                    feature_unit_D=feature_info["feature_unit"],
                     config=config,
                     device=device,
                     feature_subtract_scale=args.intervention_scale,
