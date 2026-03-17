@@ -624,7 +624,7 @@ def main() -> None:
                     verbalizer_lora_path=verbalizer_lora_path,
                     hider_adapter_name=hider_adapter_name,
                     hider_lora_path=hider_lora_path,
-                    feature_unit_D=feature_info["feature_unit"],
+                    feature_unit_D=feature_info["feature_raw"],
                     config=config,
                     device=device,
                     feature_subtract_scale=args.intervention_scale,
