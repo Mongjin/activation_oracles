@@ -64,6 +64,7 @@ class HiderActivationSimilarityConfig:
     target_lora_path_template: str
     guesser_lora_path_template: Optional[str]
     analysis_modes: list[str]
+    pca_num_components: int
 
 
 def infer_target_lora_path_template(model_name: str) -> str:
@@ -245,6 +246,91 @@ def summarize_values(values: torch.Tensor) -> dict[str, float]:
     }
 
 
+def compute_pca_result(vectors_ND: torch.Tensor, num_components: int) -> dict[str, torch.Tensor]:
+    centered_vectors_ND = vectors_ND - vectors_ND.mean(dim=0, keepdim=True)
+    _, singular_values, vh = torch.linalg.svd(centered_vectors_ND, full_matrices=False)
+
+    max_components = min(num_components, vh.shape[0])
+    components_KD = vh[:max_components]
+    scores_NK = torch.matmul(centered_vectors_ND, components_KD.T)
+
+    explained_variance = singular_values.square()
+    explained_variance_ratio = explained_variance / explained_variance.sum()
+
+    return {
+        "components_KD": components_KD,
+        "scores_NK": scores_NK,
+        "explained_variance_ratio": explained_variance_ratio[:max_components],
+        "centered_vectors_ND": centered_vectors_ND,
+    }
+
+
+def build_pca_summary(
+    per_target_vectors: dict[str, dict[int, torch.Tensor]],
+    layer_percents: list[int],
+    act_layers: list[int],
+    ordered_targets: list[str],
+    num_components: int,
+) -> dict[str, dict]:
+    summary: dict[str, dict] = {}
+
+    for layer_percent, act_layer in zip(layer_percents, act_layers):
+        target_prompt_vectors = torch.stack(
+            [per_target_vectors[target][act_layer] for target in ordered_targets],
+            dim=0,
+        ).float()
+        num_targets, num_prompts, d_model = target_prompt_vectors.shape
+        flat_vectors_ND = target_prompt_vectors.reshape(num_targets * num_prompts, d_model)
+        flat_unit_vectors_ND = F.normalize(flat_vectors_ND, dim=-1)
+
+        raw_pca = compute_pca_result(flat_vectors_ND, num_components)
+        unit_pca = compute_pca_result(flat_unit_vectors_ND, num_components)
+
+        mean_difference_raw_D = F.normalize(flat_vectors_ND.mean(dim=0), dim=0)
+        mean_difference_unit_D = F.normalize(flat_unit_vectors_ND.mean(dim=0), dim=0)
+        raw_pc1_D = F.normalize(raw_pca["components_KD"][0], dim=0)
+        unit_pc1_D = F.normalize(unit_pca["components_KD"][0], dim=0)
+
+        raw_scores_TP = raw_pca["scores_NK"][:, 0].reshape(num_targets, num_prompts)
+        unit_scores_TP = unit_pca["scores_NK"][:, 0].reshape(num_targets, num_prompts)
+
+        raw_pc1_projection_by_target = {}
+        unit_pc1_projection_by_target = {}
+        for target_idx, target in enumerate(ordered_targets):
+            raw_pc1_projection_by_target[target] = {
+                "scores": raw_scores_TP[target_idx].tolist(),
+                "stats": summarize_values(raw_scores_TP[target_idx]),
+            }
+            unit_pc1_projection_by_target[target] = {
+                "scores": unit_scores_TP[target_idx].tolist(),
+                "stats": summarize_values(unit_scores_TP[target_idx]),
+            }
+
+        summary[str(layer_percent)] = {
+            "layer_percent": layer_percent,
+            "layer_index": act_layer,
+            "num_targets": num_targets,
+            "num_prompts": num_prompts,
+            "pca_num_components": num_components,
+            "raw_centered_pca": {
+                "explained_variance_ratio": raw_pca["explained_variance_ratio"].tolist(),
+                "pc1_direction": raw_pc1_D.tolist(),
+                "pc1_cosine_with_mean_difference": float(torch.dot(raw_pc1_D, mean_difference_raw_D).item()),
+                "pc1_projection_by_target": raw_pc1_projection_by_target,
+                "pc1_projection_global_stats": summarize_values(raw_pca["scores_NK"][:, 0]),
+            },
+            "unit_normalized_centered_pca": {
+                "explained_variance_ratio": unit_pca["explained_variance_ratio"].tolist(),
+                "pc1_direction": unit_pc1_D.tolist(),
+                "pc1_cosine_with_mean_difference": float(torch.dot(unit_pc1_D, mean_difference_unit_D).item()),
+                "pc1_projection_by_target": unit_pc1_projection_by_target,
+                "pc1_projection_global_stats": summarize_values(unit_pca["scores_NK"][:, 0]),
+            },
+        }
+
+    return summary
+
+
 def build_cosine_summary(
     per_target_vectors: dict[str, dict[int, torch.Tensor]],
     layer_percents: list[int],
@@ -388,6 +474,7 @@ if __name__ == "__main__":
         default=["hider_minus_guesser", "hider_minus_base"],
         choices=["hider_minus_guesser", "hider_minus_base"],
     )
+    parser.add_argument("--pca_num_components", type=int, default=5)
     parser.add_argument("--output_dir", type=str, default="./taboo_eval_results")
     args = parser.parse_args()
 
@@ -416,6 +503,7 @@ if __name__ == "__main__":
         target_lora_path_template=target_lora_path_template,
         guesser_lora_path_template=guesser_lora_path_template,
         analysis_modes=args.analysis_modes,
+        pca_num_components=args.pca_num_components,
     )
 
     context_prompts = load_context_prompts(config.prompt_type, config.dataset_type, config.lang_type)
@@ -524,7 +612,17 @@ if __name__ == "__main__":
             ordered_targets=config.target_lora_suffixes,
             context_prompts=context_prompts,
         )
-        all_mode_summaries[analysis_mode] = cosine_summary
+        pca_summary = build_pca_summary(
+            per_target_vectors=difference_vectors,
+            layer_percents=config.layer_percents,
+            act_layers=act_layers,
+            ordered_targets=config.target_lora_suffixes,
+            num_components=config.pca_num_components,
+        )
+        all_mode_summaries[analysis_mode] = {
+            "cosine_similarity": cosine_summary,
+            "pca": pca_summary,
+        }
 
         for layer_percent, layer_info in cosine_summary.items():
             write_cosine_csv(
@@ -536,6 +634,19 @@ if __name__ == "__main__":
                 output_path=output_dir / f"{analysis_mode}_same_prompt_cosine_std_layer_{layer_percent}.csv",
                 target_words=layer_info["target_words"],
                 cosine_matrix=layer_info["same_prompt_cosine_std_matrix"],
+            )
+
+        with open(output_dir / f"{analysis_mode}_pca_summary.json", "w", encoding="utf-8") as f:
+            json.dump(
+                {
+                    "config": asdict(config),
+                    "act_layers": act_layers,
+                    "analysis_mode": analysis_mode,
+                    "layers": pca_summary,
+                },
+                f,
+                ensure_ascii=False,
+                indent=2,
             )
 
     with open(output_dir / "cosine_similarity_summary.json", "w", encoding="utf-8") as f:
