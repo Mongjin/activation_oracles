@@ -32,9 +32,14 @@ def load_summary(input_json: str) -> tuple[dict, list[int], dict[str, dict]]:
         data = json.load(f)
 
     config = data["config"]
-    analysis_mode = data["analysis_mode"]
-    layer_percents = config["layer_percents"]
-    return config, layer_percents, analysis_mode
+    if "analysis_modes" in data:
+        analysis_modes = data["analysis_modes"]
+    else:
+        analysis_modes = {data["analysis_mode"]: data["layers"]}
+
+    first_mode = next(iter(analysis_modes))
+    layer_percents = sorted(int(layer_percent) for layer_percent in analysis_modes[first_mode].keys())
+    return config, layer_percents, analysis_modes
 
 
 def draw_same_minus_different_plot(
