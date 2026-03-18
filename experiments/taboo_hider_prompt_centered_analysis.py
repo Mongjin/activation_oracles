@@ -378,23 +378,23 @@ def analyze_local_pca_and_subspace(
 
 
 def analyze_two_way_decomposition(
-    hider_TPD: torch.Tensor,
+    tensor_TPD: torch.Tensor,
     word_mean_cosine_matrix: torch.Tensor,
     target_words: list[str],
 ) -> dict:
-    num_targets, num_prompts, _ = hider_TPD.shape
+    num_targets, num_prompts, _ = tensor_TPD.shape
 
-    mu_D = hider_TPD.mean(dim=(0, 1))
-    prompt_effect_PD = hider_TPD.mean(dim=0) - mu_D.unsqueeze(0)
-    word_effect_TD = hider_TPD.mean(dim=1) - mu_D.unsqueeze(0)
+    mu_D = tensor_TPD.mean(dim=(0, 1))
+    prompt_effect_PD = tensor_TPD.mean(dim=0) - mu_D.unsqueeze(0)
+    word_effect_TD = tensor_TPD.mean(dim=1) - mu_D.unsqueeze(0)
     interaction_TPD = (
-        hider_TPD
+        tensor_TPD
         - mu_D.view(1, 1, -1)
         - prompt_effect_PD.unsqueeze(0)
         - word_effect_TD.unsqueeze(1)
     )
 
-    total_centered_TPD = hider_TPD - mu_D.view(1, 1, -1)
+    total_centered_TPD = tensor_TPD - mu_D.view(1, 1, -1)
     total_sum_squares = total_centered_TPD.square().sum()
     prompt_sum_squares = num_targets * prompt_effect_PD.square().sum()
     word_sum_squares = num_prompts * word_effect_TD.square().sum()
@@ -436,6 +436,13 @@ def analyze_two_way_decomposition(
         "word_effect_top_neighbors": top_neighbors_from_cosine_matrix(target_words, word_effect_cosine_matrix),
         "word_mean_vs_word_effect_cosine_max_abs_diff": float(
             (word_mean_cosine_matrix - word_effect_cosine_matrix).abs().max().item()
+        ),
+        "variance_fraction_sum": float(
+            (
+                (prompt_sum_squares / total_sum_squares)
+                + (word_sum_squares / total_sum_squares)
+                + (interaction_sum_squares / total_sum_squares)
+            ).item()
         ),
     }
 
@@ -504,10 +511,27 @@ def main() -> None:
             target_words=target_words,
             local_num_components=args.local_num_components,
         )
-        two_way_summary = analyze_two_way_decomposition(
-            hider_TPD=hider_TPD,
+        raw_word_mean_cosine_matrix = compute_cosine_matrix(hider_TPD.mean(dim=1))
+        raw_two_way_summary = analyze_two_way_decomposition(
+            tensor_TPD=hider_TPD,
+            word_mean_cosine_matrix=raw_word_mean_cosine_matrix,
+            target_words=target_words,
+        )
+        residual_two_way_summary = analyze_two_way_decomposition(
+            tensor_TPD=residual_TPD,
             word_mean_cosine_matrix=word_mean_cosine_matrix,
             target_words=target_words,
+        )
+
+        print(
+            f"[Layer {layer_percent}%] raw decomposition sanity: "
+            f"fraction_sum={raw_two_way_summary['variance_fraction_sum']:.6f}, "
+            f"word_mean_vs_word_effect_max_abs_diff={raw_two_way_summary['word_mean_vs_word_effect_cosine_max_abs_diff']:.6e}"
+        )
+        print(
+            f"[Layer {layer_percent}%] residual decomposition sanity: "
+            f"fraction_sum={residual_two_way_summary['variance_fraction_sum']:.6f}, "
+            f"word_mean_vs_word_effect_max_abs_diff={residual_two_way_summary['word_mean_vs_word_effect_cosine_max_abs_diff']:.6e}"
         )
 
         layer_summary = {
@@ -530,7 +554,9 @@ def main() -> None:
             "word_mean_cosine_matrix": similarity_summary["word_mean_cosine_matrix"],
             "word_mean_top_neighbors": similarity_summary["word_mean_top_neighbors"],
             "local_pca": local_pca_summary,
-            "two_way_decomposition": two_way_summary,
+            "two_way_decomposition": raw_two_way_summary,
+            "two_way_decomposition_raw": raw_two_way_summary,
+            "two_way_decomposition_prompt_centered_residual": residual_two_way_summary,
         }
         all_layer_summaries[str(layer_percent)] = layer_summary
 

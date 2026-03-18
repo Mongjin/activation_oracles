@@ -98,39 +98,71 @@ def draw_same_vs_different_plot(summary: dict, layer_percents: list[int], title:
 
 
 def draw_decomposition_fraction_plot(summary: dict, layer_percents: list[int], title: str, output_path: str) -> str:
-    prompt_fractions = []
-    word_fractions = []
-    interaction_fractions = []
+    raw_prompt_fractions = []
+    raw_word_fractions = []
+    raw_interaction_fractions = []
+    residual_prompt_fractions = []
+    residual_word_fractions = []
+    residual_interaction_fractions = []
 
     for layer_percent in layer_percents:
-        fractions = summary["layers"][str(layer_percent)]["two_way_decomposition"]["variance_fraction_by_component"]
-        prompt_fractions.append(float(fractions["prompt"]))
-        word_fractions.append(float(fractions["word"]))
-        interaction_fractions.append(float(fractions["interaction"]))
+        layer_info = summary["layers"][str(layer_percent)]
+        raw_fractions = layer_info["two_way_decomposition_raw"]["variance_fraction_by_component"]
+        residual_fractions = layer_info["two_way_decomposition_prompt_centered_residual"]["variance_fraction_by_component"]
+
+        raw_prompt_fractions.append(float(raw_fractions["prompt"]))
+        raw_word_fractions.append(float(raw_fractions["word"]))
+        raw_interaction_fractions.append(float(raw_fractions["interaction"]))
+
+        residual_prompt_fractions.append(float(residual_fractions["prompt"]))
+        residual_word_fractions.append(float(residual_fractions["word"]))
+        residual_interaction_fractions.append(float(residual_fractions["interaction"]))
 
     x = np.arange(len(layer_percents))
-    fig, ax = plt.subplots(figsize=(10, 6))
-    ax.bar(x, prompt_fractions, color="#1f77b4", label="Prompt")
-    ax.bar(x, word_fractions, bottom=np.array(prompt_fractions), color="#d62728", label="Word")
-    ax.bar(
-        x,
-        interaction_fractions,
-        bottom=np.array(prompt_fractions) + np.array(word_fractions),
-        color="#2ca02c",
-        label="Interaction",
-    )
+    fig, axes = plt.subplots(1, 2, figsize=(14, 6), sharey=True)
 
-    ax.set_title(title)
-    ax.set_xlabel("Layer Percent")
-    ax.set_ylabel("Variance Fraction")
-    ax.set_xticks(x)
-    ax.set_xticklabels(layer_percents)
-    ax.set_ylim(0.0, 1.05)
-    ax.grid(alpha=0.3, axis="y")
-    ax.legend()
+    decomposition_panels = [
+        (
+            axes[0],
+            "Raw Hider Activation",
+            raw_prompt_fractions,
+            raw_word_fractions,
+            raw_interaction_fractions,
+        ),
+        (
+            axes[1],
+            "Prompt-Centered Residual",
+            residual_prompt_fractions,
+            residual_word_fractions,
+            residual_interaction_fractions,
+        ),
+    ]
+
+    for ax, panel_title, prompt_fractions, word_fractions, interaction_fractions in decomposition_panels:
+        ax.bar(x, prompt_fractions, color="#1f77b4", label="Prompt")
+        ax.bar(x, word_fractions, bottom=np.array(prompt_fractions), color="#d62728", label="Word")
+        ax.bar(
+            x,
+            interaction_fractions,
+            bottom=np.array(prompt_fractions) + np.array(word_fractions),
+            color="#2ca02c",
+            label="Interaction",
+        )
+
+        ax.set_title(panel_title)
+        ax.set_xlabel("Layer Percent")
+        ax.set_xticks(x)
+        ax.set_xticklabels(layer_percents)
+        ax.set_ylim(0.0, 1.05)
+        ax.grid(alpha=0.3, axis="y")
+
+    axes[0].set_ylabel("Variance Fraction")
+    handles, labels = axes[0].get_legend_handles_labels()
+    fig.legend(handles, labels, loc="upper center", ncol=3, bbox_to_anchor=(0.5, 1.02))
+    fig.suptitle(title)
 
     os.makedirs(os.path.dirname(output_path), exist_ok=True)
-    fig.tight_layout()
+    fig.tight_layout(rect=[0, 0, 1, 0.94])
     fig.savefig(output_path, dpi=200)
     plt.close(fig)
     return output_path
@@ -204,7 +236,7 @@ def main() -> None:
 
     if args.output_dir is None:
         output_dir = Path(
-            "experiments/plotting/images/taboo_hider_prompt_centered_analysis"
+            "./images/taboo_hider_prompt_centered_analysis"
         ) / f"{sanitize_name(model_name)}_{sanitize_name(prompt_type)}_{sanitize_name(dataset_type)}"
     else:
         output_dir = Path(args.output_dir)
