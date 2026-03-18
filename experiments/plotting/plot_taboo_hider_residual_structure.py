@@ -32,14 +32,14 @@ def load_summary(input_json: str) -> tuple[dict, list[int], dict[str, dict]]:
         data = json.load(f)
 
     config = data["config"]
-    analysis_modes = data["analysis_modes"]
-    first_mode = next(iter(analysis_modes))
-    layer_percents = sorted(int(layer_percent) for layer_percent in analysis_modes[first_mode].keys())
-    return config, layer_percents, analysis_modes
+    analysis_mode = data["analysis_mode"]
+    first_mode = next(iter(analysis_mode))
+    layer_percents = sorted(int(layer_percent) for layer_percent in analysis_mode[first_mode].keys())
+    return config, layer_percents, analysis_mode
 
 
 def draw_same_minus_different_plot(
-    analysis_modes: dict[str, dict],
+    analysis_mode: dict[str, dict],
     layer_percents: list[int],
     output_path: Path,
     title: str,
@@ -47,7 +47,7 @@ def draw_same_minus_different_plot(
     fig, axes = plt.subplots(1, 2, figsize=(14, 5), sharex=True, sharey=True)
 
     for ax, pca_variant in zip(axes, ["raw", "unit"]):
-        for mode, mode_layers in analysis_modes.items():
+        for mode, mode_layers in analysis_mode.items():
             values = [
                 float(mode_layers[str(layer_percent)][pca_variant]["same_minus_different_mean"])
                 for layer_percent in layer_percents
@@ -77,7 +77,7 @@ def draw_same_minus_different_plot(
 
 
 def draw_same_vs_different_mean_plot(
-    analysis_modes: dict[str, dict],
+    analysis_mode: dict[str, dict],
     layer_percents: list[int],
     output_path: Path,
     title: str,
@@ -85,7 +85,7 @@ def draw_same_vs_different_mean_plot(
     fig, axes = plt.subplots(1, 2, figsize=(14, 5), sharex=True, sharey=True)
 
     for ax, pca_variant in zip(axes, ["raw", "unit"]):
-        for mode, mode_layers in analysis_modes.items():
+        for mode, mode_layers in analysis_mode.items():
             same_values = [
                 float(mode_layers[str(layer_percent)][pca_variant]["same_word_similarity"]["global_stats"]["mean"])
                 for layer_percent in layer_percents
@@ -133,7 +133,7 @@ def draw_same_vs_different_mean_plot(
 
 
 def draw_local_pc1_alignment_plot(
-    analysis_modes: dict[str, dict],
+    analysis_mode: dict[str, dict],
     layer_percents: list[int],
     output_path: Path,
     title: str,
@@ -150,8 +150,8 @@ def draw_local_pc1_alignment_plot(
             box_data = []
             pos = 1
 
-            for mode in analysis_modes:
-                layer_info = analysis_modes[mode][str(layer_percent)][pca_variant]
+            for mode in analysis_mode:
+                layer_info = analysis_mode[mode][str(layer_percent)][pca_variant]
                 original_values = list(layer_info["original_local_pc1_vs_global_pc1_cosine"].values())
                 residual_values = list(layer_info["residual_local_pc1_vs_global_pc1_cosine"].values())
 
@@ -181,13 +181,13 @@ def draw_local_pc1_alignment_plot(
 
 
 def draw_residual_word_mean_heatmaps(
-    analysis_modes: dict[str, dict],
+    analysis_mode: dict[str, dict],
     layer_percents: list[int],
     target_words: list[str],
     output_dir: Path,
 ) -> list[Path]:
     output_paths = []
-    for mode, mode_layers in analysis_modes.items():
+    for mode, mode_layers in analysis_mode.items():
         for pca_variant in ["raw", "unit"]:
             n_layers = len(layer_percents)
             fig, axes = plt.subplots(1, n_layers, figsize=(5 * n_layers, 5), squeeze=False)
@@ -223,7 +223,7 @@ def draw_residual_word_mean_heatmaps(
 
 
 def draw_global_pc1_variance_plot(
-    analysis_modes: dict[str, dict],
+    analysis_mode: dict[str, dict],
     layer_percents: list[int],
     output_path: Path,
     title: str,
@@ -231,7 +231,7 @@ def draw_global_pc1_variance_plot(
     fig, axes = plt.subplots(1, 2, figsize=(14, 5), sharex=True, sharey=True)
 
     for ax, pca_variant in zip(axes, ["raw", "unit"]):
-        for mode, mode_layers in analysis_modes.items():
+        for mode, mode_layers in analysis_mode.items():
             values = [
                 float(mode_layers[str(layer_percent)][pca_variant]["explained_variance_ratio_pc1"])
                 for layer_percent in layer_percents
@@ -265,7 +265,7 @@ def main() -> None:
     parser.add_argument("--output_dir", type=str, default="./images/taboo_hider_residual_structure")
     args = parser.parse_args()
 
-    config, layer_percents, analysis_modes = load_summary(args.input_json)
+    config, layer_percents, analysis_mode = load_summary(args.input_json)
     model_name = config["model_name"]
     prompt_type = config["prompt_type"]
     dataset_type = config["dataset_type"]
@@ -278,7 +278,7 @@ def main() -> None:
 
     variance_path = output_dir / "global_pc1_variance_by_layer.png"
     draw_global_pc1_variance_plot(
-        analysis_modes=analysis_modes,
+        analysis_mode=analysis_mode,
         layer_percents=layer_percents,
         output_path=variance_path,
         title=f"Residual Analysis | Global PC1 Variance | {model_name}",
@@ -287,7 +287,7 @@ def main() -> None:
 
     similarity_mean_path = output_dir / "same_vs_different_similarity_means.png"
     draw_same_vs_different_mean_plot(
-        analysis_modes=analysis_modes,
+        analysis_mode=analysis_mode,
         layer_percents=layer_percents,
         output_path=similarity_mean_path,
         title=f"Residual Analysis | Same vs Different Similarity | {model_name}",
@@ -296,7 +296,7 @@ def main() -> None:
 
     similarity_gap_path = output_dir / "same_minus_different_gap.png"
     draw_same_minus_different_plot(
-        analysis_modes=analysis_modes,
+        analysis_mode=analysis_mode,
         layer_percents=layer_percents,
         output_path=similarity_gap_path,
         title=f"Residual Analysis | Similarity Gap | {model_name}",
@@ -305,7 +305,7 @@ def main() -> None:
 
     local_pc1_path = output_dir / "local_pc1_vs_global_pc1_alignment.png"
     draw_local_pc1_alignment_plot(
-        analysis_modes=analysis_modes,
+        analysis_mode=analysis_mode,
         layer_percents=layer_percents,
         output_path=local_pc1_path,
         title=f"Residual Analysis | Local PC1 vs Global PC1 | {model_name}",
@@ -313,7 +313,7 @@ def main() -> None:
     print(f"Saved: {local_pc1_path}")
 
     heatmap_paths = draw_residual_word_mean_heatmaps(
-        analysis_modes=analysis_modes,
+        analysis_mode=analysis_mode,
         layer_percents=layer_percents,
         target_words=target_words,
         output_dir=output_dir,
