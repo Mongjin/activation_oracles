@@ -33,8 +33,7 @@ def load_summary(input_json: str) -> tuple[dict, list[int], dict[str, dict]]:
 
     config = data["config"]
     analysis_mode = data["analysis_mode"]
-    first_mode = next(iter(analysis_mode))
-    layer_percents = sorted(int(layer_percent) for layer_percent in analysis_mode[first_mode].keys())
+    layer_percents = config["layer_percents"]
     return config, layer_percents, analysis_mode
 
 
