@@ -25,6 +25,46 @@ def mean_offdiag(matrix: list[list[float]]) -> float:
     return float(matrix_np[mask].mean())
 
 
+def draw_deception_alignment_summary_plot(summary: dict, layer_percents: list[int], title: str, output_path: str) -> str:
+    local_pc1_abs_mean = []
+    local_pc1_abs_std = []
+    subspace_overlap_mean = []
+    subspace_overlap_std = []
+    word_mean_abs_mean = []
+    word_mean_abs_std = []
+
+    for layer_percent in layer_percents:
+        alignment = summary["layers"][str(layer_percent)]["hider_specific_residual"]["global_deception_alignment"]
+        local_pc1_abs_mean.append(float(alignment["local_pc1_absolute_cosine_stats"]["mean"]))
+        local_pc1_abs_std.append(float(alignment["local_pc1_absolute_cosine_stats"]["std"]))
+        subspace_overlap_mean.append(float(alignment["local_subspace_overlap_stats"]["mean"]))
+        subspace_overlap_std.append(float(alignment["local_subspace_overlap_stats"]["std"]))
+        word_mean_abs_mean.append(float(alignment["word_mean_absolute_cosine_stats"]["mean"]))
+        word_mean_abs_std.append(float(alignment["word_mean_absolute_cosine_stats"]["std"]))
+
+    x = np.array(layer_percents, dtype=float)
+    fig, ax = plt.subplots(figsize=(10, 6))
+    ax.plot(x, local_pc1_abs_mean, marker="o", linewidth=2, color="#1f77b4", label="Mean |Local PC1 Cosine|")
+    ax.fill_between(x, np.array(local_pc1_abs_mean) - np.array(local_pc1_abs_std), np.array(local_pc1_abs_mean) + np.array(local_pc1_abs_std), color="#1f77b4", alpha=0.15)
+    ax.plot(x, subspace_overlap_mean, marker="o", linewidth=2, color="#d62728", label="Mean Local Subspace Overlap")
+    ax.fill_between(x, np.array(subspace_overlap_mean) - np.array(subspace_overlap_std), np.array(subspace_overlap_mean) + np.array(subspace_overlap_std), color="#d62728", alpha=0.15)
+    ax.plot(x, word_mean_abs_mean, marker="o", linewidth=2, color="#2ca02c", label="Mean |Word Mean Cosine|")
+    ax.fill_between(x, np.array(word_mean_abs_mean) - np.array(word_mean_abs_std), np.array(word_mean_abs_mean) + np.array(word_mean_abs_std), color="#2ca02c", alpha=0.15)
+    ax.set_title(title)
+    ax.set_xlabel("Layer Percent")
+    ax.set_ylabel("Alignment")
+    ax.set_xticks(layer_percents)
+    ax.set_ylim(0.0, 1.05)
+    ax.grid(alpha=0.3)
+    ax.legend()
+
+    os.makedirs(os.path.dirname(output_path), exist_ok=True)
+    fig.tight_layout()
+    fig.savefig(output_path, dpi=200)
+    plt.close(fig)
+    return output_path
+
+
 def draw_cross_model_gap_plot(summary: dict, layer_percents: list[int], title: str, output_path: str) -> str:
     pc1_diag = []
     pc1_offdiag = []
@@ -206,6 +246,47 @@ def draw_heatmaps(summary: dict, layer_percents: list[int], target_words: list[s
     return output_path
 
 
+def draw_alignment_bar_panels(
+    summary: dict,
+    layer_percents: list[int],
+    target_words: list[str],
+    metric_key: str,
+    title: str,
+    output_path: str,
+    y_label: str,
+    signed: bool = False,
+) -> str:
+    n_layers = len(layer_percents)
+    fig, axes = plt.subplots(n_layers, 1, figsize=(16, 4.5 * n_layers), sharex=True)
+    if n_layers == 1:
+        axes = [axes]
+
+    for ax, layer_percent in zip(axes, layer_percents):
+        alignment = summary["layers"][str(layer_percent)]["hider_specific_residual"]["global_deception_alignment"]
+        values = [alignment[metric_key][target_word] for target_word in target_words]
+        positions = np.arange(len(target_words))
+        ax.bar(positions, values, color="#1f77b4")
+        if signed:
+            ax.axhline(0.0, color="black", linestyle="--", linewidth=1)
+            ax.set_ylim(-1.05, 1.05)
+        else:
+            ax.set_ylim(0.0, 1.05)
+        ax.set_title(f"Layer {layer_percent}%")
+        ax.set_ylabel(y_label)
+        ax.grid(alpha=0.3, axis="y")
+
+    axes[-1].set_xticks(np.arange(len(target_words)))
+    axes[-1].set_xticklabels(target_words, rotation=45, ha="right")
+    axes[-1].set_xlabel("Target Word")
+    fig.suptitle(title)
+
+    os.makedirs(os.path.dirname(output_path), exist_ok=True)
+    fig.tight_layout(rect=[0, 0, 1, 0.97])
+    fig.savefig(output_path, dpi=200)
+    plt.close(fig)
+    return output_path
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--input_json", type=str, required=True)
@@ -252,6 +333,12 @@ def main() -> None:
         title=f"{title_prefix} | Hider-Specific Local Subspace Summary",
         output_path=str(output_dir / "hider_specific_local_subspace_by_layer.png"),
     )
+    draw_deception_alignment_summary_plot(
+        summary=summary,
+        layer_percents=layer_percents,
+        title=f"{title_prefix} | Hider-Specific vs Global Deception Alignment",
+        output_path=str(output_dir / "hider_specific_vs_deception_alignment_by_layer.png"),
+    )
     draw_heatmaps(
         summary=summary,
         layer_percents=layer_percents,
@@ -275,6 +362,34 @@ def main() -> None:
         key_path=["hider_specific_residual", "local_pca", "local_subspace_similarity_matrix"],
         title=f"{title_prefix} | Hider-Specific Local Subspace Heatmaps",
         output_path=str(output_dir / "hider_specific_local_subspace_heatmaps.png"),
+    )
+    draw_alignment_bar_panels(
+        summary=summary,
+        layer_percents=layer_percents,
+        target_words=target_words,
+        metric_key="local_pc1_absolute_cosine_by_target",
+        title=f"{title_prefix} | |Local PC1, Global Deception PC1| by Word",
+        output_path=str(output_dir / "hider_specific_local_pc1_vs_deception_by_word.png"),
+        y_label="|Cosine|",
+    )
+    draw_alignment_bar_panels(
+        summary=summary,
+        layer_percents=layer_percents,
+        target_words=target_words,
+        metric_key="local_subspace_overlap_by_target",
+        title=f"{title_prefix} | Local Subspace Overlap with Global Deception PC1",
+        output_path=str(output_dir / "hider_specific_local_subspace_overlap_with_deception_by_word.png"),
+        y_label="Overlap",
+    )
+    draw_alignment_bar_panels(
+        summary=summary,
+        layer_percents=layer_percents,
+        target_words=target_words,
+        metric_key="word_mean_signed_cosine_by_target",
+        title=f"{title_prefix} | Hider-Specific Word Mean vs Global Deception PC1",
+        output_path=str(output_dir / "hider_specific_word_mean_vs_deception_by_word.png"),
+        y_label="Cosine",
+        signed=True,
     )
 
     print(f"Saved plots to {output_dir}")

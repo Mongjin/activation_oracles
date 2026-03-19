@@ -114,6 +114,21 @@ def compute_subspace_similarity(basis_i_KD: torch.Tensor, basis_j_KD: torch.Tens
     return float(singular_values.square().mean().item())
 
 
+def load_global_deception_pc1_by_layer(
+    summary_path: Path,
+    variant_key: str,
+    layer_percents: list[int],
+) -> dict[int, torch.Tensor]:
+    with open(summary_path, "r", encoding="utf-8") as f:
+        data = json.load(f)
+
+    layers = data["layers"]
+    return {
+        layer_percent: torch.tensor(layers[str(layer_percent)][variant_key]["pc1_direction"]).float()
+        for layer_percent in layer_percents
+    }
+
+
 def build_orthonormal_basis_from_rows(rows_KD: torch.Tensor) -> torch.Tensor:
     q_DR, _ = torch.linalg.qr(rows_KD.T, mode="reduced")
     return q_DR.T
@@ -233,6 +248,56 @@ def summarize_norms_by_target(tensor_TPD: torch.Tensor, target_words: list[str])
     return {
         target_word: summarize_values(tensor_TPD[target_idx].norm(dim=-1))
         for target_idx, target_word in enumerate(target_words)
+    }
+
+
+def analyze_global_deception_alignment(
+    local_bases: dict[str, torch.Tensor],
+    hider_specific_TPD: torch.Tensor,
+    target_words: list[str],
+    global_deception_pc1_D: torch.Tensor,
+) -> dict:
+    global_deception_pc1_D = F.normalize(global_deception_pc1_D, dim=0)
+
+    local_pc1_signed = {}
+    local_pc1_abs = {}
+    local_subspace_overlap = {}
+    word_mean_signed = {}
+    word_mean_abs = {}
+    word_mean_norm = {}
+
+    for target_idx, target_word in enumerate(target_words):
+        local_pc1_D = F.normalize(local_bases[target_word][0], dim=0)
+        signed_pc1_cosine = float(torch.dot(local_pc1_D, global_deception_pc1_D).item())
+        local_pc1_signed[target_word] = signed_pc1_cosine
+        local_pc1_abs[target_word] = abs(signed_pc1_cosine)
+
+        projection_D = project_onto_subspace(global_deception_pc1_D.unsqueeze(0), local_bases[target_word]).squeeze(0)
+        local_subspace_overlap[target_word] = float(projection_D.norm().item())
+
+        word_mean_D = hider_specific_TPD[target_idx].mean(dim=0)
+        word_mean_norm[target_word] = float(word_mean_D.norm().item())
+        normalized_word_mean_D = F.normalize(word_mean_D, dim=0)
+        signed_word_mean_cosine = float(torch.dot(normalized_word_mean_D, global_deception_pc1_D).item())
+        word_mean_signed[target_word] = signed_word_mean_cosine
+        word_mean_abs[target_word] = abs(signed_word_mean_cosine)
+
+    local_pc1_abs_values = torch.tensor([local_pc1_abs[target] for target in target_words])
+    local_subspace_overlap_values = torch.tensor([local_subspace_overlap[target] for target in target_words])
+    word_mean_abs_values = torch.tensor([word_mean_abs[target] for target in target_words])
+    word_mean_signed_values = torch.tensor([word_mean_signed[target] for target in target_words])
+
+    return {
+        "local_pc1_signed_cosine_by_target": local_pc1_signed,
+        "local_pc1_absolute_cosine_by_target": local_pc1_abs,
+        "local_pc1_absolute_cosine_stats": summarize_values(local_pc1_abs_values),
+        "local_subspace_overlap_by_target": local_subspace_overlap,
+        "local_subspace_overlap_stats": summarize_values(local_subspace_overlap_values),
+        "word_mean_signed_cosine_by_target": word_mean_signed,
+        "word_mean_absolute_cosine_by_target": word_mean_abs,
+        "word_mean_signed_cosine_stats": summarize_values(word_mean_signed_values),
+        "word_mean_absolute_cosine_stats": summarize_values(word_mean_abs_values),
+        "word_mean_norm_by_target": word_mean_norm,
     }
 
 
@@ -673,6 +738,13 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--input_dir", type=str, required=True)
     parser.add_argument("--output_dir", type=str, default=None)
+    parser.add_argument("--deception_pca_summary_path", type=str, default=None)
+    parser.add_argument(
+        "--deception_pca_variant",
+        type=str,
+        default="raw_centered_pca",
+        choices=["raw_centered_pca", "unit_normalized_centered_pca"],
+    )
     parser.add_argument("--train_prompt_fraction", type=float, default=0.8)
     parser.add_argument("--probe_lr", type=float, default=1e-3)
     parser.add_argument("--probe_epochs", type=int, default=25)
@@ -694,6 +766,16 @@ def main() -> None:
 
     target_words = config["target_lora_suffixes"]
     layer_percents = config["layer_percents"]
+    deception_pca_summary_path = (
+        Path(args.deception_pca_summary_path)
+        if args.deception_pca_summary_path is not None
+        else input_dir / "hider_minus_guesser_pca_summary.json"
+    )
+    global_deception_pc1_by_layer = load_global_deception_pc1_by_layer(
+        summary_path=deception_pca_summary_path,
+        variant_key=args.deception_pca_variant,
+        layer_percents=layer_percents,
+    )
 
     output_dir = Path(args.output_dir) if args.output_dir is not None else input_dir
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -744,10 +826,16 @@ def main() -> None:
             target_words=target_words,
         )
 
-        _, hider_specific_local_summary = analyze_local_pca_and_subspace(
+        hider_specific_local_bases, hider_specific_local_summary = analyze_local_pca_and_subspace(
             residual_TPD=hider_specific_TPD,
             target_words=target_words,
             local_num_components=args.local_num_components,
+        )
+        global_deception_alignment = analyze_global_deception_alignment(
+            local_bases=hider_specific_local_bases,
+            hider_specific_TPD=hider_specific_TPD,
+            target_words=target_words,
+            global_deception_pc1_D=global_deception_pc1_by_layer[layer_percent],
         )
         word_probe_summary = analyze_word_probe(
             residual_TPD=hider_specific_TPD,
@@ -792,6 +880,12 @@ def main() -> None:
             f"role_linear_test={role_probe_summary['linear']['test']['accuracy']:.4f}, "
             f"role_mlp_test={role_probe_summary['mlp']['test']['accuracy']:.4f}"
         )
+        print(
+            f"[Layer {layer_percent}%] deception alignment: "
+            f"local_pc1_abs_mean={global_deception_alignment['local_pc1_absolute_cosine_stats']['mean']:.4f}, "
+            f"subspace_overlap_mean={global_deception_alignment['local_subspace_overlap_stats']['mean']:.4f}, "
+            f"word_mean_abs_mean={global_deception_alignment['word_mean_absolute_cosine_stats']['mean']:.4f}"
+        )
 
         layer_summary = {
             "layer_percent": layer_percent,
@@ -830,6 +924,7 @@ def main() -> None:
             },
             "hider_specific_residual": {
                 "local_pca": hider_specific_local_summary,
+                "global_deception_alignment": global_deception_alignment,
                 "word_probe": word_probe_summary,
                 "role_probe": role_probe_summary,
             },
@@ -884,6 +979,32 @@ def main() -> None:
             col_labels=["guesser", "hider"],
             matrix=layer_summary["hider_specific_residual"]["role_probe"]["mlp"]["test"]["confusion_matrix"],
         )
+        with open(output_dir / f"hider_specific_vs_deception_metrics_layer_{layer_percent}.csv", "w", newline="", encoding="utf-8") as f:
+            writer = csv.writer(f)
+            writer.writerow(
+                [
+                    "target_word",
+                    "local_pc1_signed_cosine",
+                    "local_pc1_absolute_cosine",
+                    "local_subspace_overlap",
+                    "word_mean_signed_cosine",
+                    "word_mean_absolute_cosine",
+                    "word_mean_norm",
+                ]
+            )
+            alignment = layer_summary["hider_specific_residual"]["global_deception_alignment"]
+            for target_word in target_words:
+                writer.writerow(
+                    [
+                        target_word,
+                        alignment["local_pc1_signed_cosine_by_target"][target_word],
+                        alignment["local_pc1_absolute_cosine_by_target"][target_word],
+                        alignment["local_subspace_overlap_by_target"][target_word],
+                        alignment["word_mean_signed_cosine_by_target"][target_word],
+                        alignment["word_mean_absolute_cosine_by_target"][target_word],
+                        alignment["word_mean_norm_by_target"][target_word],
+                    ]
+                )
 
     with open(output_dir / "hider_guesser_subspace_analysis_summary.json", "w", encoding="utf-8") as f:
         json.dump(
@@ -891,6 +1012,8 @@ def main() -> None:
                 "config": config,
                 "act_layers": act_layers,
                 "analysis_config": {
+                    "deception_pca_summary_path": str(deception_pca_summary_path),
+                    "deception_pca_variant": args.deception_pca_variant,
                     "train_prompt_fraction": args.train_prompt_fraction,
                     "probe_lr": args.probe_lr,
                     "probe_epochs": args.probe_epochs,
