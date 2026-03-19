@@ -10,6 +10,7 @@ os.environ["TORCHDYNAMO_DISABLE"] = "1"
 os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
 
 import torch
+import torch.nn.functional as F
 from peft import LoraConfig
 from tqdm import tqdm
 
@@ -155,14 +156,43 @@ def load_pc1_metadata_by_layer(
         layer_entry = layer_summary[str(layer_percent)]
         pca_entry = layer_entry[pca_key]
         pc1_direction_D = torch.tensor(pca_entry["pc1_direction"], dtype=torch.float32)
+        projection_stats = pca_entry["pc1_projection_global_stats"]
+        projection_std = float(projection_stats["std"])
         metadata_by_layer[layer_percent] = {
             "direction_D": pc1_direction_D,
             "direction_norm": float(pc1_direction_D.norm().item()),
+            "projection_std": projection_std,
+            "projection_stats": projection_stats,
+            "projection_std_scaled_direction_D": pc1_direction_D * projection_std,
             "explained_variance_ratio_pc1": float(pca_entry["explained_variance_ratio"][0]),
             "pc1_cosine_with_mean_difference": float(pca_entry["pc1_cosine_with_mean_difference"]),
             "layer_index": int(layer_entry["layer_index"]),
         }
     return metadata_by_layer
+
+
+def summarize_values(values: torch.Tensor) -> dict[str, float]:
+    values = values.detach().float().cpu()
+    return {
+        "count": int(values.numel()),
+        "mean": float(values.mean().item()),
+        "std": float(values.std(unbiased=False).item()),
+        "min": float(values.min().item()),
+        "max": float(values.max().item()),
+        "median": float(values.median().item()),
+        "q25": float(torch.quantile(values, 0.25).item()),
+        "q75": float(torch.quantile(values, 0.75).item()),
+    }
+
+
+def get_last_token_positions(inputs_BL: dict[str, torch.Tensor]) -> list[int]:
+    seq_len = int(inputs_BL["input_ids"].shape[1])
+    positions = []
+    for batch_idx in range(inputs_BL["input_ids"].shape[0]):
+        real_len = int(inputs_BL["attention_mask"][batch_idx].sum().item())
+        left_pad = seq_len - real_len
+        positions.append(left_pad + real_len - 1)
+    return positions
 
 
 def collect_acts_for_adapter(
@@ -192,20 +222,23 @@ def run_pc1_intervention_verbalizer(
     verbalizer_lora_path: Optional[str],
     hider_adapter_name: str,
     hider_lora_path: str,
-    pc1_direction_D: torch.Tensor,
+    pc1_vector_D: torch.Tensor,
     config: base_experiment.VerbalizerEvalConfig,
     device: torch.device,
     intervention_scale: float,
     analysis_mode: str,
     pca_variant: str,
+    pc1_vector_mode: str,
     pc1_explained_variance_ratio: float,
     pc1_cosine_with_mean_difference: float,
-) -> list[dict[str, Any]]:
+) -> tuple[list[dict[str, Any]], dict[str, float], dict[str, torch.Tensor]]:
     dtype = torch.bfloat16
     injection_submodule = get_hf_submodule(model, config.injection_layer)
 
     pbar = tqdm(total=len(verbalizer_prompt_infos), desc="Verbalizer Eval Progress", position=1)
     results: list[dict[str, Any]] = []
+    all_context_token_cosines = []
+    all_last_token_cosines = []
 
     for start in range(0, len(verbalizer_prompt_infos), config.eval_batch_size):
         batch = verbalizer_prompt_infos[start : start + config.eval_batch_size]
@@ -223,10 +256,28 @@ def run_pc1_intervention_verbalizer(
             active_layer=config.active_layer,
             adapter_name=hider_adapter_name,
         )
-        pc1_direction_device = pc1_direction_D.to(hider_acts.device, hider_acts.dtype)
-        pc1_shift = (pc1_direction_device * intervention_scale).view(1, 1, -1)
+        pc1_vector_device = pc1_vector_D.to(hider_acts.device, hider_acts.dtype)
+        pc1_shift = (pc1_vector_device * intervention_scale).view(1, 1, -1)
         modified_hider_acts = hider_acts - pc1_shift
         target_activations = {config.active_layer: modified_hider_acts}
+
+        attention_mask_BL = inputs_BL["attention_mask"].bool()
+        original_context_acts = hider_acts[attention_mask_BL]
+        modified_context_acts = modified_hider_acts[attention_mask_BL]
+        context_token_cosines = F.cosine_similarity(original_context_acts, modified_context_acts, dim=-1)
+        all_context_token_cosines.append(context_token_cosines.detach().cpu())
+
+        last_token_positions = get_last_token_positions(inputs_BL)
+        original_last_token_acts = torch.stack(
+            [hider_acts[b_idx, last_pos, :] for b_idx, last_pos in enumerate(last_token_positions)],
+            dim=0,
+        )
+        modified_last_token_acts = torch.stack(
+            [modified_hider_acts[b_idx, last_pos, :] for b_idx, last_pos in enumerate(last_token_positions)],
+            dim=0,
+        )
+        last_token_cosines = F.cosine_similarity(original_last_token_acts, modified_last_token_acts, dim=-1)
+        all_last_token_cosines.append(last_token_cosines.detach().cpu())
 
         seq_len = int(inputs_BL["input_ids"].shape[1])
         context_input_ids_list: list[list[int]] = []
@@ -253,6 +304,7 @@ def run_pc1_intervention_verbalizer(
                 "intervention_scale": intervention_scale,
                 "analysis_mode": analysis_mode,
                 "pca_variant": pca_variant,
+                "pc1_vector_mode": pc1_vector_mode,
                 "pc1_explained_variance_ratio": pc1_explained_variance_ratio,
                 "pc1_cosine_with_mean_difference": pc1_cosine_with_mean_difference,
             }
@@ -311,6 +363,7 @@ def run_pc1_intervention_verbalizer(
                     "intervention_scale": meta["intervention_scale"],
                     "analysis_mode": meta["analysis_mode"],
                     "pca_variant": meta["pca_variant"],
+                    "pc1_vector_mode": meta["pc1_vector_mode"],
                     "pc1_explained_variance_ratio": meta["pc1_explained_variance_ratio"],
                     "pc1_cosine_with_mean_difference": meta["pc1_cosine_with_mean_difference"],
                 }
@@ -344,6 +397,7 @@ def run_pc1_intervention_verbalizer(
                     "intervention_scale": bucket["intervention_scale"],
                     "analysis_mode": bucket["analysis_mode"],
                     "pca_variant": bucket["pca_variant"],
+                    "pc1_vector_mode": bucket["pc1_vector_mode"],
                     "pc1_explained_variance_ratio": bucket["pc1_explained_variance_ratio"],
                     "pc1_cosine_with_mean_difference": bucket["pc1_cosine_with_mean_difference"],
                 }
@@ -353,7 +407,17 @@ def run_pc1_intervention_verbalizer(
         pbar.update(len(batch))
 
     pbar.close()
-    return results
+    context_token_cosines = torch.cat(all_context_token_cosines, dim=0)
+    last_token_cosines = torch.cat(all_last_token_cosines, dim=0)
+    diagnostics = {
+        "context_token_cosine_stats": summarize_values(context_token_cosines),
+        "last_token_cosine_stats": summarize_values(last_token_cosines),
+    }
+    raw_diagnostics = {
+        "context_token_cosines": context_token_cosines,
+        "last_token_cosines": last_token_cosines,
+    }
+    return results, diagnostics, raw_diagnostics
 
 
 def main() -> None:
@@ -384,6 +448,12 @@ def main() -> None:
         choices=["hider_minus_guesser", "hider_minus_base"],
     )
     parser.add_argument("--pca_variant", type=str, default="raw", choices=["raw", "unit"])
+    parser.add_argument(
+        "--pc1_vector_mode",
+        type=str,
+        default="unit_direction",
+        choices=["unit_direction", "projection_std_scaled"],
+    )
     parser.add_argument("--intervention_scale", type=float, default=1.0)
     args = parser.parse_args()
 
@@ -456,9 +526,18 @@ def main() -> None:
             selected_layer_percent=selected_layer_percent,
         )
         pc1_metadata = pc1_metadata_by_layer[selected_layer_percent]
+        if args.pc1_vector_mode == "unit_direction":
+            pc1_vector_D = pc1_metadata["direction_D"]
+        elif args.pc1_vector_mode == "projection_std_scaled":
+            pc1_vector_D = pc1_metadata["projection_std_scaled_direction_D"]
+        else:
+            raise ValueError(f"Unsupported pc1_vector_mode: {args.pc1_vector_mode}")
 
         for verbalizer_lora_path in verbalizer_lora_paths:
             verbalizer_results: list[dict[str, Any]] = []
+            diagnostics_by_word: dict[str, dict[str, dict[str, float]]] = {}
+            all_context_token_cosines = []
+            all_last_token_cosines = []
             verbalizer_adapter_name = None
             if verbalizer_lora_path is not None:
                 verbalizer_adapter_name = base_experiment.load_lora_adapter(model, verbalizer_lora_path)
@@ -481,7 +560,7 @@ def main() -> None:
                     verbalizer_prompts=verbalizer_prompts,
                 )
 
-                results = run_pc1_intervention_verbalizer(
+                results, diagnostics, raw_diagnostics = run_pc1_intervention_verbalizer(
                     model=model,
                     tokenizer=tokenizer,
                     verbalizer_prompt_infos=verbalizer_prompt_infos,
@@ -489,33 +568,48 @@ def main() -> None:
                     verbalizer_lora_path=verbalizer_lora_path,
                     hider_adapter_name=hider_adapter_name,
                     hider_lora_path=hider_lora_path,
-                    pc1_direction_D=pc1_metadata["direction_D"],
+                    pc1_vector_D=pc1_vector_D,
                     config=config,
                     device=device,
                     intervention_scale=args.intervention_scale,
                     analysis_mode=args.analysis_mode,
                     pca_variant=args.pca_variant,
+                    pc1_vector_mode=args.pc1_vector_mode,
                     pc1_explained_variance_ratio=pc1_metadata["explained_variance_ratio_pc1"],
                     pc1_cosine_with_mean_difference=pc1_metadata["pc1_cosine_with_mean_difference"],
                 )
                 verbalizer_results.extend(results)
+                diagnostics_by_word[target_word] = diagnostics
+                all_context_token_cosines.append(raw_diagnostics["context_token_cosines"])
+                all_last_token_cosines.append(raw_diagnostics["last_token_cosines"])
 
                 if hider_adapter_name in model.peft_config:
                     model.delete_adapter(hider_adapter_name)
 
                 combo_pbar.update(1)
 
+            global_context_token_cosines = torch.cat(all_context_token_cosines, dim=0)
+            global_last_token_cosines = torch.cat(all_last_token_cosines, dim=0)
             final_results = {
                 "config": asdict(config),
                 "pc1_summary_json": args.pc1_summary_json,
                 "analysis_mode": args.analysis_mode,
                 "pca_variant": args.pca_variant,
-                "intervention_formula": "hider_activation - alpha * pc1_direction",
+                "pc1_vector_mode": args.pc1_vector_mode,
+                "intervention_formula": "hider_activation - alpha * pc1_vector",
                 "intervention_scale": args.intervention_scale,
                 "pc1_direction_norm": pc1_metadata["direction_norm"],
+                "pc1_projection_std": pc1_metadata["projection_std"],
+                "pc1_vector_norm": float(pc1_vector_D.norm().item()),
                 "pc1_explained_variance_ratio": pc1_metadata["explained_variance_ratio_pc1"],
                 "pc1_cosine_with_mean_difference": pc1_metadata["pc1_cosine_with_mean_difference"],
                 "pc1_layer_index": pc1_metadata["layer_index"],
+                "pc1_projection_stats": pc1_metadata["projection_stats"],
+                "intervention_direction_change_diagnostics": {
+                    "context_token_cosine_stats": summarize_values(global_context_token_cosines),
+                    "last_token_cosine_stats": summarize_values(global_last_token_cosines),
+                },
+                "intervention_direction_change_diagnostics_by_word": diagnostics_by_word,
                 "verbalizer_lora_path": verbalizer_lora_path,
                 "hider_lora_template": hider_lora_template,
                 "target_words": target_words,
@@ -532,7 +626,7 @@ def main() -> None:
             output_json = output_json_template.format(
                 lora=(
                     f"{lora_name}_layer_{selected_layer_percent}_{args.verbalize_prompt}_"
-                    f"{args.analysis_mode}_{args.pca_variant}_alpha_{alpha_str}"
+                    f"{args.analysis_mode}_{args.pca_variant}_{args.pc1_vector_mode}_alpha_{alpha_str}"
                 )
             )
             with open(output_json, "w", encoding="utf-8") as f:
