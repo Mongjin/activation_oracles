@@ -229,6 +229,7 @@ def run_pc1_intervention_verbalizer(
     analysis_mode: str,
     pca_variant: str,
     pc1_vector_mode: str,
+    pc1_removal_mode: str,
     pc1_explained_variance_ratio: float,
     pc1_cosine_with_mean_difference: float,
 ) -> tuple[list[dict[str, Any]], dict[str, float], dict[str, torch.Tensor]]:
@@ -239,6 +240,7 @@ def run_pc1_intervention_verbalizer(
     results: list[dict[str, Any]] = []
     all_context_token_cosines = []
     all_last_token_cosines = []
+    all_projection_coefficients = []
 
     for start in range(0, len(verbalizer_prompt_infos), config.eval_batch_size):
         batch = verbalizer_prompt_infos[start : start + config.eval_batch_size]
@@ -257,9 +259,28 @@ def run_pc1_intervention_verbalizer(
             adapter_name=hider_adapter_name,
         )
         pc1_vector_device = pc1_vector_D.to(hider_acts.device, hider_acts.dtype)
-        pc1_shift = (pc1_vector_device * intervention_scale).view(1, 1, -1)
-        modified_hider_acts = hider_acts - pc1_shift
+        pc1_unit_device = F.normalize(pc1_vector_device, dim=0)
+
+        last_token_positions = get_last_token_positions(inputs_BL)
+        original_last_token_acts = torch.stack(
+            [hider_acts[b_idx, last_pos, :] for b_idx, last_pos in enumerate(last_token_positions)],
+            dim=0,
+        )
+        projection_coefficients = torch.matmul(original_last_token_acts, pc1_unit_device)
+
+        if pc1_removal_mode == "global_scale":
+            pc1_shift = (pc1_vector_device * intervention_scale).view(1, 1, -1)
+            modified_hider_acts = hider_acts - pc1_shift
+        elif pc1_removal_mode == "per_sample_projection":
+            removal_vectors_BD = (
+                intervention_scale * projection_coefficients.unsqueeze(-1) * pc1_unit_device.unsqueeze(0)
+            )
+            modified_hider_acts = hider_acts - removal_vectors_BD.unsqueeze(1)
+        else:
+            raise ValueError(f"Unsupported pc1_removal_mode: {pc1_removal_mode}")
+
         target_activations = {config.active_layer: modified_hider_acts}
+        all_projection_coefficients.append(projection_coefficients.detach().cpu())
 
         attention_mask_BL = inputs_BL["attention_mask"].bool()
         original_context_acts = hider_acts[attention_mask_BL]
@@ -267,11 +288,6 @@ def run_pc1_intervention_verbalizer(
         context_token_cosines = F.cosine_similarity(original_context_acts, modified_context_acts, dim=-1)
         all_context_token_cosines.append(context_token_cosines.detach().cpu())
 
-        last_token_positions = get_last_token_positions(inputs_BL)
-        original_last_token_acts = torch.stack(
-            [hider_acts[b_idx, last_pos, :] for b_idx, last_pos in enumerate(last_token_positions)],
-            dim=0,
-        )
         modified_last_token_acts = torch.stack(
             [modified_hider_acts[b_idx, last_pos, :] for b_idx, last_pos in enumerate(last_token_positions)],
             dim=0,
@@ -283,7 +299,8 @@ def run_pc1_intervention_verbalizer(
             f"layer%={config.selected_layer_percent} "
             f"target={Path(hider_lora_path).name} "
             f"oracle={(Path(verbalizer_lora_path).name if verbalizer_lora_path is not None else 'base_model')} "
-            f"mode={pc1_vector_mode} alpha={intervention_scale} "
+            f"vector_mode={pc1_vector_mode} removal_mode={pc1_removal_mode} alpha={intervention_scale} "
+            f"proj_mean={projection_coefficients.mean().item():.6f} "
             f"context_cos_mean={context_token_cosines.mean().item():.6f} "
             f"last_cos_mean={last_token_cosines.mean().item():.6f}"
         )
@@ -314,6 +331,7 @@ def run_pc1_intervention_verbalizer(
                 "analysis_mode": analysis_mode,
                 "pca_variant": pca_variant,
                 "pc1_vector_mode": pc1_vector_mode,
+                "pc1_removal_mode": pc1_removal_mode,
                 "pc1_explained_variance_ratio": pc1_explained_variance_ratio,
                 "pc1_cosine_with_mean_difference": pc1_cosine_with_mean_difference,
             }
@@ -373,6 +391,7 @@ def run_pc1_intervention_verbalizer(
                     "analysis_mode": meta["analysis_mode"],
                     "pca_variant": meta["pca_variant"],
                     "pc1_vector_mode": meta["pc1_vector_mode"],
+                    "pc1_removal_mode": meta["pc1_removal_mode"],
                     "pc1_explained_variance_ratio": meta["pc1_explained_variance_ratio"],
                     "pc1_cosine_with_mean_difference": meta["pc1_cosine_with_mean_difference"],
                 }
@@ -407,6 +426,7 @@ def run_pc1_intervention_verbalizer(
                     "analysis_mode": bucket["analysis_mode"],
                     "pca_variant": bucket["pca_variant"],
                     "pc1_vector_mode": bucket["pc1_vector_mode"],
+                    "pc1_removal_mode": bucket["pc1_removal_mode"],
                     "pc1_explained_variance_ratio": bucket["pc1_explained_variance_ratio"],
                     "pc1_cosine_with_mean_difference": bucket["pc1_cosine_with_mean_difference"],
                 }
@@ -418,19 +438,22 @@ def run_pc1_intervention_verbalizer(
     pbar.close()
     context_token_cosines = torch.cat(all_context_token_cosines, dim=0)
     last_token_cosines = torch.cat(all_last_token_cosines, dim=0)
+    projection_coefficients = torch.cat(all_projection_coefficients, dim=0)
     diagnostics = {
         "context_token_cosine_stats": summarize_values(context_token_cosines),
         "last_token_cosine_stats": summarize_values(last_token_cosines),
+        "projection_coefficient_stats": summarize_values(projection_coefficients),
     }
     tqdm.write(
         "[pc1-intervention-summary] "
         f"layer%={config.selected_layer_percent} "
         f"target={Path(hider_lora_path).name} "
         f"oracle={(Path(verbalizer_lora_path).name if verbalizer_lora_path is not None else 'base_model')} "
-        f"mode={pc1_vector_mode} alpha={intervention_scale} "
+        f"vector_mode={pc1_vector_mode} removal_mode={pc1_removal_mode} alpha={intervention_scale} "
         f"context_mean={diagnostics['context_token_cosine_stats']['mean']:.6f} "
         f"context_q25={diagnostics['context_token_cosine_stats']['q25']:.6f} "
         f"context_q75={diagnostics['context_token_cosine_stats']['q75']:.6f} "
+        f"proj_mean={diagnostics['projection_coefficient_stats']['mean']:.6f} "
         f"last_mean={diagnostics['last_token_cosine_stats']['mean']:.6f} "
         f"last_q25={diagnostics['last_token_cosine_stats']['q25']:.6f} "
         f"last_q75={diagnostics['last_token_cosine_stats']['q75']:.6f}"
@@ -438,6 +461,7 @@ def run_pc1_intervention_verbalizer(
     raw_diagnostics = {
         "context_token_cosines": context_token_cosines,
         "last_token_cosines": last_token_cosines,
+        "projection_coefficients": projection_coefficients,
     }
     return results, diagnostics, raw_diagnostics
 
@@ -475,6 +499,12 @@ def main() -> None:
         type=str,
         default="unit_direction",
         choices=["unit_direction", "projection_std_scaled"],
+    )
+    parser.add_argument(
+        "--pc1_removal_mode",
+        type=str,
+        default="global_scale",
+        choices=["global_scale", "per_sample_projection"],
     )
     parser.add_argument("--intervention_scale", type=float, default=1.0)
     args = parser.parse_args()
@@ -561,6 +591,7 @@ def main() -> None:
             f"analysis_mode={args.analysis_mode} "
             f"pca_variant={args.pca_variant} "
             f"pc1_vector_mode={args.pc1_vector_mode} "
+            f"pc1_removal_mode={args.pc1_removal_mode} "
             f"pc1_direction_norm={pc1_metadata['direction_norm']:.6f} "
             f"pc1_projection_std={pc1_metadata['projection_std']:.6f} "
             f"pc1_vector_norm={pc1_vector_D.norm().item():.6f}"
@@ -571,6 +602,7 @@ def main() -> None:
             diagnostics_by_word: dict[str, dict[str, dict[str, float]]] = {}
             all_context_token_cosines = []
             all_last_token_cosines = []
+            all_projection_coefficients = []
             verbalizer_adapter_name = None
             if verbalizer_lora_path is not None:
                 verbalizer_adapter_name = base_experiment.load_lora_adapter(model, verbalizer_lora_path)
@@ -608,6 +640,7 @@ def main() -> None:
                     analysis_mode=args.analysis_mode,
                     pca_variant=args.pca_variant,
                     pc1_vector_mode=args.pc1_vector_mode,
+                    pc1_removal_mode=args.pc1_removal_mode,
                     pc1_explained_variance_ratio=pc1_metadata["explained_variance_ratio_pc1"],
                     pc1_cosine_with_mean_difference=pc1_metadata["pc1_cosine_with_mean_difference"],
                 )
@@ -615,6 +648,7 @@ def main() -> None:
                 diagnostics_by_word[target_word] = diagnostics
                 all_context_token_cosines.append(raw_diagnostics["context_token_cosines"])
                 all_last_token_cosines.append(raw_diagnostics["last_token_cosines"])
+                all_projection_coefficients.append(raw_diagnostics["projection_coefficients"])
 
                 if hider_adapter_name in model.peft_config:
                     model.delete_adapter(hider_adapter_name)
@@ -623,12 +657,14 @@ def main() -> None:
 
             global_context_token_cosines = torch.cat(all_context_token_cosines, dim=0)
             global_last_token_cosines = torch.cat(all_last_token_cosines, dim=0)
+            global_projection_coefficients = torch.cat(all_projection_coefficients, dim=0)
             final_results = {
                 "config": asdict(config),
                 "pc1_summary_json": args.pc1_summary_json,
                 "analysis_mode": args.analysis_mode,
                 "pca_variant": args.pca_variant,
                 "pc1_vector_mode": args.pc1_vector_mode,
+                "pc1_removal_mode": args.pc1_removal_mode,
                 "intervention_formula": "hider_activation - alpha * pc1_vector",
                 "intervention_scale": args.intervention_scale,
                 "pc1_direction_norm": pc1_metadata["direction_norm"],
@@ -641,6 +677,7 @@ def main() -> None:
                 "intervention_direction_change_diagnostics": {
                     "context_token_cosine_stats": summarize_values(global_context_token_cosines),
                     "last_token_cosine_stats": summarize_values(global_last_token_cosines),
+                    "projection_coefficient_stats": summarize_values(global_projection_coefficients),
                 },
                 "intervention_direction_change_diagnostics_by_word": diagnostics_by_word,
                 "verbalizer_lora_path": verbalizer_lora_path,
@@ -659,7 +696,7 @@ def main() -> None:
             output_json = output_json_template.format(
                 lora=(
                     f"{lora_name}_layer_{selected_layer_percent}_{args.verbalize_prompt}_"
-                    f"{args.analysis_mode}_{args.pca_variant}_{args.pc1_vector_mode}_alpha_{alpha_str}"
+                    f"{args.analysis_mode}_{args.pca_variant}_{args.pc1_vector_mode}_{args.pc1_removal_mode}_alpha_{alpha_str}"
                 )
             )
             with open(output_json, "w", encoding="utf-8") as f:
@@ -669,10 +706,11 @@ def main() -> None:
                 "[pc1-oracle-summary] "
                 f"layer%={selected_layer_percent} "
                 f"oracle={lora_name} "
-                f"mode={args.pc1_vector_mode} alpha={args.intervention_scale} "
+                f"vector_mode={args.pc1_vector_mode} removal_mode={args.pc1_removal_mode} alpha={args.intervention_scale} "
                 f"context_mean={final_results['intervention_direction_change_diagnostics']['context_token_cosine_stats']['mean']:.6f} "
                 f"context_q25={final_results['intervention_direction_change_diagnostics']['context_token_cosine_stats']['q25']:.6f} "
                 f"context_q75={final_results['intervention_direction_change_diagnostics']['context_token_cosine_stats']['q75']:.6f} "
+                f"proj_mean={final_results['intervention_direction_change_diagnostics']['projection_coefficient_stats']['mean']:.6f} "
                 f"last_mean={final_results['intervention_direction_change_diagnostics']['last_token_cosine_stats']['mean']:.6f} "
                 f"last_q25={final_results['intervention_direction_change_diagnostics']['last_token_cosine_stats']['q25']:.6f} "
                 f"last_q75={final_results['intervention_direction_change_diagnostics']['last_token_cosine_stats']['q75']:.6f}"
