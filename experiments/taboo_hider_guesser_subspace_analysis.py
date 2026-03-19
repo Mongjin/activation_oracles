@@ -114,6 +114,11 @@ def compute_subspace_similarity(basis_i_KD: torch.Tensor, basis_j_KD: torch.Tens
     return float(singular_values.square().mean().item())
 
 
+def build_orthonormal_basis_from_rows(rows_KD: torch.Tensor) -> torch.Tensor:
+    q_DR, _ = torch.linalg.qr(rows_KD.T, mode="reduced")
+    return q_DR.T
+
+
 def analyze_local_pca_and_subspace(
     residual_TPD: torch.Tensor,
     target_words: list[str],
@@ -203,7 +208,7 @@ def project_onto_subspace(vectors_PD: torch.Tensor, basis_KD: torch.Tensor) -> t
 def remove_same_word_guesser_subspace(
     hider_residual_TPD: torch.Tensor,
     guesser_residual_TPD: torch.Tensor,
-    guesser_bases: dict[str, torch.Tensor],
+    guesser_shared_bases: dict[str, torch.Tensor],
     target_words: list[str],
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     hider_specific = torch.zeros_like(hider_residual_TPD)
@@ -212,7 +217,7 @@ def remove_same_word_guesser_subspace(
     guesser_removed = torch.zeros_like(guesser_residual_TPD)
 
     for target_idx, target_word in enumerate(target_words):
-        basis_KD = guesser_bases[target_word]
+        basis_KD = guesser_shared_bases[target_word]
         hider_projection = project_onto_subspace(hider_residual_TPD[target_idx], basis_KD)
         guesser_projection = project_onto_subspace(guesser_residual_TPD[target_idx], basis_KD)
 
@@ -229,6 +234,40 @@ def summarize_norms_by_target(tensor_TPD: torch.Tensor, target_words: list[str])
         target_word: summarize_values(tensor_TPD[target_idx].norm(dim=-1))
         for target_idx, target_word in enumerate(target_words)
     }
+
+
+def build_train_fitted_guesser_shared_bases(
+    guesser_residual_TPD: torch.Tensor,
+    target_words: list[str],
+    train_prompt_indices: list[int],
+    local_num_components: int,
+) -> tuple[dict[str, torch.Tensor], dict]:
+    shared_bases = {}
+    basis_summary = {}
+
+    for target_idx, target_word in enumerate(target_words):
+        guesser_train_PD = guesser_residual_TPD[target_idx, train_prompt_indices, :]
+        word_mean_D = guesser_train_PD.mean(dim=0)
+        local_basis_KD, local_evr_K = compute_local_pca(
+            guesser_train_PD,
+            num_components=local_num_components,
+        )
+        combined_rows = torch.cat(
+            [
+                F.normalize(word_mean_D, dim=0).unsqueeze(0),
+                local_basis_KD,
+            ],
+            dim=0,
+        )
+        shared_basis_KD = build_orthonormal_basis_from_rows(combined_rows)
+        shared_bases[target_word] = shared_basis_KD
+        basis_summary[target_word] = {
+            "word_mean_norm": float(word_mean_D.norm().item()),
+            "local_explained_variance_ratio": local_evr_K.tolist(),
+            "shared_basis_rank": int(shared_basis_KD.shape[0]),
+        }
+
+    return shared_bases, basis_summary
 
 
 def build_word_probe_tensors(
@@ -666,14 +705,14 @@ def main() -> None:
         hider_TPD = torch.stack([per_target_hider_vectors[target_word][act_layer] for target_word in target_words], dim=0).float()
         guesser_TPD = torch.stack([per_target_guesser_vectors[target_word][act_layer] for target_word in target_words], dim=0).float()
 
-        _, hider_residual_TPD = compute_prompt_centered_residual(hider_TPD)
-        _, guesser_residual_TPD = compute_prompt_centered_residual(guesser_TPD)
-
         train_prompt_indices, test_prompt_indices = make_prompt_split(
             num_prompts=hider_TPD.shape[1],
             train_fraction=args.train_prompt_fraction,
             seed=args.seed,
         )
+
+        _, hider_residual_TPD = compute_prompt_centered_residual(hider_TPD)
+        _, guesser_residual_TPD = compute_prompt_centered_residual(guesser_TPD)
 
         hider_local_bases, hider_local_summary = analyze_local_pca_and_subspace(
             residual_TPD=hider_residual_TPD,
@@ -691,10 +730,17 @@ def main() -> None:
             target_words=target_words,
         )
 
+        guesser_shared_bases, guesser_shared_basis_summary = build_train_fitted_guesser_shared_bases(
+            guesser_residual_TPD=guesser_residual_TPD,
+            target_words=target_words,
+            train_prompt_indices=train_prompt_indices,
+            local_num_components=args.local_num_components,
+        )
+
         hider_specific_TPD, guesser_after_projection_TPD, hider_removed_TPD, guesser_removed_TPD = remove_same_word_guesser_subspace(
             hider_residual_TPD=hider_residual_TPD,
             guesser_residual_TPD=guesser_residual_TPD,
-            guesser_bases=guesser_local_bases,
+            guesser_shared_bases=guesser_shared_bases,
             target_words=target_words,
         )
 
@@ -735,6 +781,11 @@ def main() -> None:
             f"subspace_gap={cross_model_summary['subspace_diagonal_minus_off_diagonal']:.4f}"
         )
         print(
+            f"[Layer {layer_percent}%] guesser shared basis fit: "
+            f"train_prompts={len(train_prompt_indices)}, test_prompts={len(test_prompt_indices)}, "
+            f"mean_shared_rank={sum(v['shared_basis_rank'] for v in guesser_shared_basis_summary.values()) / len(target_words):.2f}"
+        )
+        print(
             f"[Layer {layer_percent}%] hider-specific probes: "
             f"word_linear_test={word_probe_summary['linear']['test']['accuracy']:.4f}, "
             f"word_mlp_test={word_probe_summary['mlp']['test']['accuracy']:.4f}, "
@@ -758,6 +809,11 @@ def main() -> None:
             "hider_local_pca": hider_local_summary,
             "guesser_local_pca": guesser_local_summary,
             "hider_vs_guesser_similarity": cross_model_summary,
+            "train_fitted_guesser_shared_basis": {
+                "train_prompt_indices": train_prompt_indices,
+                "test_prompt_indices": test_prompt_indices,
+                "by_target": guesser_shared_basis_summary,
+            },
             "guesser_subspace_projection_removal": {
                 "hider_specific_norm_stats": summarize_values(hider_specific_TPD.norm(dim=-1).reshape(-1)),
                 "hider_specific_norm_by_target": summarize_norms_by_target(hider_specific_TPD, target_words),
@@ -841,6 +897,7 @@ def main() -> None:
                     "probe_batch_size": args.probe_batch_size,
                     "mlp_hidden_dim": args.mlp_hidden_dim,
                     "local_num_components": args.local_num_components,
+                    "guesser_shared_structure_basis": "train_prompt_word_mean_plus_local_subspace",
                     "seed": args.seed,
                 },
                 "layers": all_layer_summaries,
