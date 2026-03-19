@@ -301,7 +301,7 @@ def main() -> None:
 
     if args.output_dir is None:
         output_dir = Path(
-            "experiments/plotting/images/taboo_hider_guesser_subspace_analysis"
+            "./images/taboo_hider_guesser_subspace_analysis"
         ) / f"{sanitize_name(model_name)}_{sanitize_name(prompt_type)}_{sanitize_name(dataset_type)}"
     else:
         output_dir = Path(args.output_dir)
