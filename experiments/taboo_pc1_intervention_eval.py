@@ -278,6 +278,15 @@ def run_pc1_intervention_verbalizer(
         )
         last_token_cosines = F.cosine_similarity(original_last_token_acts, modified_last_token_acts, dim=-1)
         all_last_token_cosines.append(last_token_cosines.detach().cpu())
+        tqdm.write(
+            "[pc1-intervention] "
+            f"layer%={config.selected_layer_percent} "
+            f"target={Path(hider_lora_path).name} "
+            f"oracle={(Path(verbalizer_lora_path).name if verbalizer_lora_path is not None else 'base_model')} "
+            f"mode={pc1_vector_mode} alpha={intervention_scale} "
+            f"context_cos_mean={context_token_cosines.mean().item():.6f} "
+            f"last_cos_mean={last_token_cosines.mean().item():.6f}"
+        )
 
         seq_len = int(inputs_BL["input_ids"].shape[1])
         context_input_ids_list: list[list[int]] = []
@@ -413,6 +422,19 @@ def run_pc1_intervention_verbalizer(
         "context_token_cosine_stats": summarize_values(context_token_cosines),
         "last_token_cosine_stats": summarize_values(last_token_cosines),
     }
+    tqdm.write(
+        "[pc1-intervention-summary] "
+        f"layer%={config.selected_layer_percent} "
+        f"target={Path(hider_lora_path).name} "
+        f"oracle={(Path(verbalizer_lora_path).name if verbalizer_lora_path is not None else 'base_model')} "
+        f"mode={pc1_vector_mode} alpha={intervention_scale} "
+        f"context_mean={diagnostics['context_token_cosine_stats']['mean']:.6f} "
+        f"context_q25={diagnostics['context_token_cosine_stats']['q25']:.6f} "
+        f"context_q75={diagnostics['context_token_cosine_stats']['q75']:.6f} "
+        f"last_mean={diagnostics['last_token_cosine_stats']['mean']:.6f} "
+        f"last_q25={diagnostics['last_token_cosine_stats']['q25']:.6f} "
+        f"last_q75={diagnostics['last_token_cosine_stats']['q75']:.6f}"
+    )
     raw_diagnostics = {
         "context_token_cosines": context_token_cosines,
         "last_token_cosines": last_token_cosines,
@@ -532,6 +554,17 @@ def main() -> None:
             pc1_vector_D = pc1_metadata["projection_std_scaled_direction_D"]
         else:
             raise ValueError(f"Unsupported pc1_vector_mode: {args.pc1_vector_mode}")
+        tqdm.write(
+            "[pc1-layer-config] "
+            f"layer%={selected_layer_percent} "
+            f"layer_idx={pc1_metadata['layer_index']} "
+            f"analysis_mode={args.analysis_mode} "
+            f"pca_variant={args.pca_variant} "
+            f"pc1_vector_mode={args.pc1_vector_mode} "
+            f"pc1_direction_norm={pc1_metadata['direction_norm']:.6f} "
+            f"pc1_projection_std={pc1_metadata['projection_std']:.6f} "
+            f"pc1_vector_norm={pc1_vector_D.norm().item():.6f}"
+        )
 
         for verbalizer_lora_path in verbalizer_lora_paths:
             verbalizer_results: list[dict[str, Any]] = []
@@ -632,6 +665,18 @@ def main() -> None:
             with open(output_json, "w", encoding="utf-8") as f:
                 json.dump(final_results, f, indent=2)
             print(f"Saved results to {output_json}")
+            tqdm.write(
+                "[pc1-oracle-summary] "
+                f"layer%={selected_layer_percent} "
+                f"oracle={lora_name} "
+                f"mode={args.pc1_vector_mode} alpha={args.intervention_scale} "
+                f"context_mean={final_results['intervention_direction_change_diagnostics']['context_token_cosine_stats']['mean']:.6f} "
+                f"context_q25={final_results['intervention_direction_change_diagnostics']['context_token_cosine_stats']['q25']:.6f} "
+                f"context_q75={final_results['intervention_direction_change_diagnostics']['context_token_cosine_stats']['q75']:.6f} "
+                f"last_mean={final_results['intervention_direction_change_diagnostics']['last_token_cosine_stats']['mean']:.6f} "
+                f"last_q25={final_results['intervention_direction_change_diagnostics']['last_token_cosine_stats']['q25']:.6f} "
+                f"last_q75={final_results['intervention_direction_change_diagnostics']['last_token_cosine_stats']['q75']:.6f}"
+            )
 
     combo_pbar.close()
 
