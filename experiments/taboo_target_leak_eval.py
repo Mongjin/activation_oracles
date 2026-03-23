@@ -392,6 +392,7 @@ if __name__ == "__main__":
     )
     parser.add_argument("--intervention_scale", type=float, default=1.0)
     parser.add_argument("--layer_percents", type=int, nargs="+", default=[25, 50, 75])
+    parser.add_argument("--model_type", type=str, default='hider')
     args = parser.parse_args()
 
     random.seed(42)
@@ -410,6 +411,8 @@ if __name__ == "__main__":
         target_lora_path_template: Optional[str] = "adamkarvonen/Qwen3-8B-taboo-{lora_path}_50_mix"
     elif model_name == "google/gemma-2-9b-it":
         target_lora_path_template = "bcywinski/gemma-2-9b-it-taboo-{lora_path}"
+        if args.model_type == 'guesser':
+            target_lora_path_template = "/home/mongjin/activation_oracles/nl_probes/trl_training/model_lora_role_swapped/gemma-2-9b-it-taboo-{lora_path}-role-swapped"
     else:
         raise ValueError(f"Unsupported model_name: {model_name}")
 
