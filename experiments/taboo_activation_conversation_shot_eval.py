@@ -364,6 +364,13 @@ if __name__ == "__main__":
     parser.add_argument("--max_context_prompts", type=int, default=None)
     parser.add_argument("--save_records", action="store_true")
     parser.add_argument("--output_dir", type=str, default="./taboo_eval_results")
+    parser.add_argument(
+        "--verbalize_prompt",
+        type=str,
+        default="secret_word",
+        choices=["secret_word", "concept", "intent", "concept_intent", "synonym"],
+        help="Verbalizer prompt mode. secret_word uses the original prompts.",
+    )
     args = parser.parse_args()
 
     for source in args.activation_sources:
