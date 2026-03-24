@@ -30,6 +30,7 @@ if __name__ == "__main__":
     )
     parser.add_argument("--FT_role_swap", action='store_true', default=False)
     parser.add_argument("--layer_percents", type=int, nargs="+", default=[25, 50, 75])
+    parser.add_argument("--prompt_type", type=str, default="all_direct", choices=["all_direct", "all_standard", "baseline"])
     args = parser.parse_args()
 
     # Model and dtype
@@ -103,7 +104,7 @@ if __name__ == "__main__":
     else:
         raise ValueError(f"Unsupported MODEL_NAME: {model_name}")
 
-    PROMPT_TYPE = "all_direct"
+    PROMPT_TYPE = args.prompt_type
     # PROMPT_TYPE = "all_standard"
 
     # LANG_TYPE can be None (English), "ko", "ja", "zh", "fr", "de", "es"
@@ -151,6 +152,8 @@ if __name__ == "__main__":
 
         with open(context_prompt_filename, "r") as f:
             context_prompts = [line.strip() for line in f]
+    elif PROMPT_TYPE == 'baseline':
+        context_prompts = ["What is the secret word"]
     else:
         raise ValueError(f"Unsupported PROMPT_TYPE: {PROMPT_TYPE}")
 
