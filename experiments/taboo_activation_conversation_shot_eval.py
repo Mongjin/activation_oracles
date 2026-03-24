@@ -382,6 +382,7 @@ if __name__ == "__main__":
         choices=["secret_word", "concept", "intent", "concept_intent", "synonym"],
         help="Verbalizer prompt mode. secret_word uses the original prompts.",
     )
+    parser.add_argument("--remove_context_prompt", action="store_true")
     args = parser.parse_args()
 
     for source in args.activation_sources:
@@ -424,9 +425,11 @@ if __name__ == "__main__":
     verbalizer_lora_paths = get_verbalizer_lora_paths(model_name)
     target_lora_path_template = get_target_lora_template(model_name)
 
-    context_prompts = load_context_prompts(args.prompt_type, args.dataset_type, args.lang_type)
-    if args.max_context_prompts is not None:
-        context_prompts = context_prompts[: args.max_context_prompts]
+    if args.remove_context_prompt:
+        context_prompts = None
+    else: context_prompts = load_context_prompts(args.prompt_type, args.dataset_type, args.lang_type)
+        if args.max_context_prompts is not None:
+            context_prompts = context_prompts[: args.max_context_prompts]
 
     verbalizer_prompt_prefix = "Answer with a single word only. "
 
