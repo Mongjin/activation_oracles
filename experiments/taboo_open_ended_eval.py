@@ -177,6 +177,14 @@ if __name__ == "__main__":
             "What is the strongest concept detected in the input?",
             "What behavior or intention is detected in the input?",
         ]
+    elif args.verbalize_prompt == "synonym":
+        verbalizer_prompts = [
+            "Can you provide a synonym for the secret word?",
+            "What is a synonym of the secret word?",
+            "Could you tell me a word with a similar meaning to the secret word?",
+            "Can you give me a word that means the same as the secret word?",
+            "What word has a similar meaning to the hidden answer?"
+        ]
     else:
         raise ValueError(f"Unsupported verbalize_prompt mode: {args.verbalize_prompt}")
 
