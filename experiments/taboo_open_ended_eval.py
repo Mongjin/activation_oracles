@@ -29,6 +29,7 @@ if __name__ == "__main__":
         help="Verbalizer prompt mode. secret_word uses the original prompts.",
     )
     parser.add_argument("--FT_role_swap", action='store_true', default=False)
+    parser.add_argument("--layer_percents", type=int, nargs="+", default=[25, 50, 75])
     args = parser.parse_args()
 
     # Model and dtype
@@ -121,7 +122,7 @@ if __name__ == "__main__":
         "max_new_tokens": 50,
     }
 
-    layer_percents = [25, 50, 75]
+    layer_percents = args.layer_percents
 
     experiments_dir: str = "./taboo_eval_results"
     lang_suffix = f"_{LANG_TYPE}" if LANG_TYPE else ""
