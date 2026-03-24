@@ -427,7 +427,8 @@ if __name__ == "__main__":
 
     if args.remove_context_prompt:
         context_prompts = None
-    else: context_prompts = load_context_prompts(args.prompt_type, args.dataset_type, args.lang_type)
+    else: 
+        context_prompts = load_context_prompts(args.prompt_type, args.dataset_type, args.lang_type)
         if args.max_context_prompts is not None:
             context_prompts = context_prompts[: args.max_context_prompts]
 
