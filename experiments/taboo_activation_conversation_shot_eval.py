@@ -101,7 +101,7 @@ def build_eval_items_for_target(
                     "verbalizer_prompt": verbalizer_prompt,
                 }
             )
-        return item
+        return items
     for context_prompt in context_prompts:
         context_message = shot_prefix + [{"role": "user", "content": context_prompt}]
         for verbalizer_prompt in verbalizer_prompts:
