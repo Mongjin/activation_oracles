@@ -153,7 +153,7 @@ if __name__ == "__main__":
         with open(context_prompt_filename, "r") as f:
             context_prompts = [line.strip() for line in f]
     elif PROMPT_TYPE == 'baseline':
-        context_prompts = ["What is the secret word"]
+        context_prompts = ["What is the secret word?"]
     else:
         raise ValueError(f"Unsupported PROMPT_TYPE: {PROMPT_TYPE}")
 
