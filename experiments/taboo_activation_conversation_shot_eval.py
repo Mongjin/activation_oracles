@@ -91,6 +91,17 @@ def build_eval_items_for_target(
     shot_prefix = build_shot_prefix_messages(target_dataset, num_shots)
 
     items: list[dict] = []
+    if context_prompts is None:
+        for verbalizer_prompt in verbalizer_prompts:
+            items.append(
+                {
+                    "target_word": target_word,
+                    "context_prompt": None,
+                    "context_message": shot_prefix,
+                    "verbalizer_prompt": verbalizer_prompt,
+                }
+            )
+        return item
     for context_prompt in context_prompts:
         context_message = shot_prefix + [{"role": "user", "content": context_prompt}]
         for verbalizer_prompt in verbalizer_prompts:
