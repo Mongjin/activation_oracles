@@ -25,7 +25,7 @@ if __name__ == "__main__":
         "--verbalize_prompt",
         type=str,
         default="secret_word",
-        choices=["secret_word", "concept", "intent", "concept_intent"],
+        choices=["secret_word", "concept", "intent", "concept_intent", "synonym"],
         help="Verbalizer prompt mode. secret_word uses the original prompts.",
     )
     parser.add_argument("--FT_role_swap", action='store_true', default=False)
