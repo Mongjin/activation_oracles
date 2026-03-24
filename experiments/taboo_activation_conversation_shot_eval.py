@@ -96,7 +96,7 @@ def build_eval_items_for_target(
             items.append(
                 {
                     "target_word": target_word,
-                    "context_prompt": None,
+                    "context_prompt": shot_prefix,
                     "context_message": shot_prefix,
                     "verbalizer_prompt": verbalizer_prompt,
                 }
