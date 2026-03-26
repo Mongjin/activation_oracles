@@ -26,6 +26,44 @@ def sanitize_name(value: str) -> str:
     return value.replace("/", "_").replace(" ", "_")
 
 
+def strip_variant_suffix(value: str) -> str:
+    for suffix in ["_swapped", "_hider", "_guesser"]:
+        if value.endswith(suffix):
+            return value[: -len(suffix)]
+    return value
+
+
+def infer_run_label(json_dir: Path, fallback: str) -> str:
+    name = json_dir.name.lower()
+    if "swapped" in name or "role_swap" in name:
+        return "guesser"
+    if "baseline" in name:
+        return "baseline"
+    if "open_ended" in name:
+        return "hider"
+    return fallback
+
+
+def build_prompt_perf_base_name(json_dir: Path, token_or_seq: str, act_key: str) -> str:
+    run_tag = sanitize_name(strip_variant_suffix(json_dir.name))
+    return f"taboo_context_prompt_perf_{run_tag}_{token_or_seq}_{sanitize_name(act_key)}"
+
+
+def build_prompt_compare_base_name(
+    json_dir: Path,
+    primary_label: str,
+    compare_label: str,
+    token_or_seq: str,
+    act_key: str,
+) -> str:
+    run_tag = sanitize_name(strip_variant_suffix(json_dir.name))
+    return (
+        f"taboo_context_prompt_compare_{run_tag}_"
+        f"{sanitize_name(primary_label)}_vs_{sanitize_name(compare_label)}_"
+        f"{token_or_seq}_{sanitize_name(act_key)}"
+    )
+
+
 def token_slice_idx(model_name: str) -> int:
     if "gemma" in model_name.lower():
         return -3
@@ -75,7 +113,6 @@ def load_prompt_performance(
     required_act_key: str,
 ):
     prompt_scores = defaultdict(lambda: defaultdict(list))
-    prompt_text_by_key = {}
     model_name = None
 
     for json_file in discover_json_files(json_dir):
@@ -93,7 +130,6 @@ def load_prompt_performance(
                 continue
 
             prompt_text = extract_context_prompt_text(record)
-            prompt_text_by_key[prompt_text] = prompt_text
             prompt_scores[prompt_text][(layer_percent, lora_key)].append(
                 calculate_accuracy(record, model_name, sequence)
             )
@@ -438,9 +474,8 @@ def main() -> None:
         required_act_key=args.act_key,
     )
 
-    data_dir_label = json_dir.name
     token_or_seq = "sequence" if args.sequence else "token"
-    base_name = f"taboo_context_prompt_performance_{sanitize_name(model_name)}_{data_dir_label}_{token_or_seq}_{args.act_key}"
+    base_name = build_prompt_perf_base_name(json_dir, token_or_seq, args.act_key)
 
     if args.mode != "compare_only":
         csv_path = Path(args.output_dir) / f"{base_name}.csv"
@@ -490,8 +525,8 @@ def main() -> None:
         if column_keys != compare_column_keys:
             raise ValueError("Column layout mismatch between primary and compare runs")
 
-        primary_label = args.primary_label or json_dir.name
-        compare_label = args.compare_label or compare_json_dir.name
+        primary_label = args.primary_label or infer_run_label(json_dir, "run_a")
+        compare_label = args.compare_label or infer_run_label(compare_json_dir, "run_b")
 
         aligned_rows, summary = compare_prompt_rows(
             primary_prompt_rows=prompt_rows,
@@ -500,8 +535,12 @@ def main() -> None:
             compare_label=compare_label,
         )
 
-        compare_base_name = (
-            f"{base_name}_compare_{sanitize_name(primary_label)}_vs_{sanitize_name(compare_label)}"
+        compare_base_name = build_prompt_compare_base_name(
+            json_dir=json_dir,
+            primary_label=primary_label,
+            compare_label=compare_label,
+            token_or_seq=token_or_seq,
+            act_key=args.act_key,
         )
 
         compare_csv_path = Path(args.output_dir) / f"{compare_base_name}.csv"

@@ -23,6 +23,34 @@ def sanitize_name(value: str) -> str:
     return value.replace("/", "_").replace(" ", "_")
 
 
+def infer_run_label_from_csv(csv_path: Path, fallback: str) -> str:
+    stem = csv_path.stem.lower()
+    if "swapped" in stem or "guesser" in stem:
+        return "guesser"
+    if "baseline" in stem:
+        return "baseline"
+    if "hider" in stem or "open_ended" in stem:
+        return "hider"
+    return fallback
+
+
+def infer_metric_tag(csv_path: Path) -> str:
+    stem = csv_path.stem.lower()
+    if "_sequence_" in stem:
+        mode = "sequence"
+    elif "_token_" in stem:
+        mode = "token"
+    else:
+        mode = "scores"
+
+    act_key = "scores"
+    for candidate in ["lora", "orig", "diff"]:
+        if stem.endswith(f"_{candidate}") or f"_{candidate}_" in stem:
+            act_key = candidate
+            break
+    return f"{mode}_{act_key}"
+
+
 def load_prompt_csv(csv_path: Path) -> list[dict]:
     with open(csv_path, "r", encoding="utf-8") as f:
         reader = csv.DictReader(f)
@@ -417,9 +445,9 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--primary_csv", type=str, required=True)
     parser.add_argument("--compare_csv", type=str, default=None)
-    parser.add_argument("--output_dir", type=str, default="./images/taboo")
-    parser.add_argument("--primary_label", type=str, default="primary")
-    parser.add_argument("--compare_label", type=str, default="compare")
+    parser.add_argument("--output_dir", type=str, default="./images/taboo_context_prompt_taxanomy")
+    parser.add_argument("--primary_label", type=str, default=None)
+    parser.add_argument("--compare_label", type=str, default=None)
     args = parser.parse_args()
 
     primary_csv = Path(args.primary_csv)
@@ -442,11 +470,20 @@ def main() -> None:
     taxonomy_rows = build_taxonomy_rows(primary_rows, compare_rows)
     category_rows = aggregate_by_category(taxonomy_rows, include_compare=compare_rows is not None)
 
-    stem = sanitize_name(primary_csv.stem)
-    if compare_rows is not None:
-        stem += f"_vs_{sanitize_name(Path(args.compare_csv).stem)}"
-
     output_dir = Path(args.output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    primary_label = args.primary_label or infer_run_label_from_csv(primary_csv, "run_a")
+    compare_label = None
+    if compare_rows is not None:
+        compare_label = args.compare_label or infer_run_label_from_csv(Path(args.compare_csv), "run_b")
+    metric_tag = infer_metric_tag(primary_csv)
+
+    stem = f"taboo_context_prompt_taxonomy_{sanitize_name(primary_label)}"
+    if compare_label is not None:
+        stem += f"_vs_{sanitize_name(compare_label)}"
+    stem += f"_{metric_tag}"
+
     taxonomy_csv_path = output_dir / f"{stem}_taxonomy.csv"
     save_taxonomy_csv(taxonomy_csv_path, taxonomy_rows, include_compare=compare_rows is not None)
     print(f"Saved taxonomy CSV: {taxonomy_csv_path}")
@@ -462,8 +499,8 @@ def main() -> None:
         metadata={
             "primary_csv": str(primary_csv),
             "compare_csv": args.compare_csv,
-            "primary_label": args.primary_label,
-            "compare_label": args.compare_label if compare_rows is not None else None,
+            "primary_label": primary_label,
+            "compare_label": compare_label if compare_rows is not None else None,
         },
     )
     print(f"Saved category summary JSON: {category_json_path}")
@@ -471,8 +508,8 @@ def main() -> None:
     means_plot_path = output_dir / f"{stem}_category_means.png"
     plot_category_means(
         category_rows=category_rows,
-        primary_label=args.primary_label,
-        compare_label=args.compare_label if compare_rows is not None else None,
+        primary_label=primary_label,
+        compare_label=compare_label if compare_rows is not None else None,
         output_path=means_plot_path,
     )
     print(f"Saved: {means_plot_path}")
@@ -481,8 +518,8 @@ def main() -> None:
         delta_plot_path = output_dir / f"{stem}_category_deltas.png"
         plot_category_deltas(
             category_rows=category_rows,
-            primary_label=args.primary_label,
-            compare_label=args.compare_label,
+            primary_label=primary_label,
+            compare_label=compare_label,
             output_path=delta_plot_path,
         )
         print(f"Saved: {delta_plot_path}")
