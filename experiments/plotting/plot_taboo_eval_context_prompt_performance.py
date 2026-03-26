@@ -45,7 +45,7 @@ def infer_run_label(json_dir: Path, fallback: str) -> str:
 
 
 def build_prompt_perf_base_name(json_dir: Path, token_or_seq: str, act_key: str) -> str:
-    run_tag = sanitize_name(strip_variant_suffix(json_dir.name))
+    run_tag = sanitize_name(json_dir.name)
     return f"taboo_context_prompt_perf_{run_tag}_{token_or_seq}_{sanitize_name(act_key)}"
 
 
