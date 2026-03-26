@@ -161,6 +161,184 @@ def save_prompt_csv(output_path: Path, prompt_rows: list[dict], column_keys: lis
             writer.writerow(csv_row)
 
 
+def compute_pearson(values_a: np.ndarray, values_b: np.ndarray) -> float:
+    if values_a.shape != values_b.shape:
+        raise ValueError("Pearson inputs must have the same shape")
+    if values_a.size == 0:
+        raise ValueError("Pearson inputs must be non-empty")
+    return float(np.corrcoef(values_a, values_b)[0, 1])
+
+
+def compute_descending_ranks(values: np.ndarray) -> np.ndarray:
+    order = np.argsort(-values, kind="mergesort")
+    ranks = np.empty_like(order, dtype=float)
+    ranks[order] = np.arange(1, len(values) + 1, dtype=float)
+    return ranks
+
+
+def compute_spearman(values_a: np.ndarray, values_b: np.ndarray) -> float:
+    ranks_a = compute_descending_ranks(values_a)
+    ranks_b = compute_descending_ranks(values_b)
+    return compute_pearson(ranks_a, ranks_b)
+
+
+def compare_prompt_rows(
+    primary_prompt_rows: list[dict],
+    compare_prompt_rows: list[dict],
+    primary_label: str,
+    compare_label: str,
+) -> tuple[list[dict], dict[str, float | int]]:
+    primary_map = {row["prompt_text"]: row for row in primary_prompt_rows}
+    compare_map = {row["prompt_text"]: row for row in compare_prompt_rows}
+
+    common_prompts = sorted(set(primary_map.keys()) & set(compare_map.keys()))
+    if len(common_prompts) == 0:
+        raise ValueError("No common context prompts found between the two runs")
+
+    primary_only = sorted(set(primary_map.keys()) - set(compare_map.keys()))
+    compare_only = sorted(set(compare_map.keys()) - set(primary_map.keys()))
+
+    aligned_rows = []
+    primary_values = []
+    compare_values = []
+
+    for prompt_text in common_prompts:
+        primary_row = primary_map[prompt_text]
+        compare_row = compare_map[prompt_text]
+        primary_values.append(primary_row["overall_mean"])
+        compare_values.append(compare_row["overall_mean"])
+        aligned_rows.append(
+            {
+                "prompt_text": prompt_text,
+                "primary_prompt_id": primary_row["prompt_id"],
+                "compare_prompt_id": compare_row["prompt_id"],
+                "primary_overall_mean": primary_row["overall_mean"],
+                "compare_overall_mean": compare_row["overall_mean"],
+            }
+        )
+
+    primary_array = np.array(primary_values, dtype=float)
+    compare_array = np.array(compare_values, dtype=float)
+    pearson = compute_pearson(primary_array, compare_array)
+    spearman = compute_spearman(primary_array, compare_array)
+
+    primary_ranks = compute_descending_ranks(primary_array)
+    compare_ranks = compute_descending_ranks(compare_array)
+
+    for idx, row in enumerate(aligned_rows):
+        row["primary_rank"] = int(primary_ranks[idx])
+        row["compare_rank"] = int(compare_ranks[idx])
+        row["mean_delta"] = float(row["primary_overall_mean"] - row["compare_overall_mean"])
+        row["abs_mean_delta"] = abs(row["mean_delta"])
+        row["rank_delta"] = int(row["primary_rank"] - row["compare_rank"])
+        row["abs_rank_delta"] = abs(row["rank_delta"])
+
+    top_k = min(20, len(aligned_rows))
+    primary_top = {row["prompt_text"] for row in sorted(aligned_rows, key=lambda row: row["primary_rank"])[:top_k]}
+    compare_top = {row["prompt_text"] for row in sorted(aligned_rows, key=lambda row: row["compare_rank"])[:top_k]}
+    primary_bottom = {row["prompt_text"] for row in sorted(aligned_rows, key=lambda row: row["primary_rank"], reverse=True)[:top_k]}
+    compare_bottom = {row["prompt_text"] for row in sorted(aligned_rows, key=lambda row: row["compare_rank"], reverse=True)[:top_k]}
+
+    summary = {
+        "primary_label": primary_label,
+        "compare_label": compare_label,
+        "num_common_prompts": len(common_prompts),
+        "num_primary_only_prompts": len(primary_only),
+        "num_compare_only_prompts": len(compare_only),
+        "pearson_overall_mean": pearson,
+        "spearman_overall_mean": spearman,
+        "top20_overlap_count": len(primary_top & compare_top),
+        "bottom20_overlap_count": len(primary_bottom & compare_bottom),
+    }
+    return aligned_rows, summary
+
+
+def save_compare_csv(output_path: Path, aligned_rows: list[dict]) -> None:
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    fieldnames = [
+        "primary_prompt_id",
+        "compare_prompt_id",
+        "primary_overall_mean",
+        "compare_overall_mean",
+        "mean_delta",
+        "abs_mean_delta",
+        "primary_rank",
+        "compare_rank",
+        "rank_delta",
+        "abs_rank_delta",
+        "prompt_text",
+    ]
+
+    with open(output_path, "w", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        writer.writeheader()
+        for row in sorted(aligned_rows, key=lambda item: item["primary_rank"]):
+            writer.writerow({field: row[field] for field in fieldnames})
+
+
+def save_compare_summary(output_path: Path, summary: dict[str, float | int]) -> None:
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(output_path, "w", encoding="utf-8") as f:
+        json.dump(summary, f, indent=2)
+
+
+def plot_compare_scatter(
+    aligned_rows: list[dict],
+    summary: dict[str, float | int],
+    output_path: Path,
+) -> None:
+    primary_label = str(summary["primary_label"])
+    compare_label = str(summary["compare_label"])
+    x_values = np.array([row["primary_overall_mean"] for row in aligned_rows], dtype=float)
+    y_values = np.array([row["compare_overall_mean"] for row in aligned_rows], dtype=float)
+
+    fig, ax = plt.subplots(figsize=(8.5, 8))
+    ax.scatter(x_values, y_values, alpha=0.7, s=36, color="#1f77b4")
+    ax.plot([0.0, 1.0], [0.0, 1.0], linestyle="--", color="#666666", linewidth=1)
+    ax.set_xlim(0.0, 1.05)
+    ax.set_ylim(0.0, 1.05)
+    ax.set_xlabel(f"{primary_label} prompt mean accuracy")
+    ax.set_ylabel(f"{compare_label} prompt mean accuracy")
+    ax.set_title(
+        f"Context Prompt Agreement\nPearson={summary['pearson_overall_mean']:.3f}, "
+        f"Spearman={summary['spearman_overall_mean']:.3f}"
+    )
+    ax.grid(alpha=0.3)
+
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    plt.tight_layout()
+    plt.savefig(output_path, dpi=300, bbox_inches="tight")
+    plt.close(fig)
+
+
+def plot_prompt_gap_bars(
+    aligned_rows: list[dict],
+    primary_label: str,
+    compare_label: str,
+    output_path: Path,
+    top_k: int,
+) -> None:
+    rows = sorted(aligned_rows, key=lambda row: row["abs_mean_delta"], reverse=True)[:top_k]
+    y_labels = [row["primary_prompt_id"] for row in rows]
+    deltas = [row["mean_delta"] for row in rows]
+    colors = ["#2ca02c" if delta >= 0 else "#d62728" for delta in deltas]
+
+    fig, ax = plt.subplots(figsize=(12, max(6, 0.45 * top_k + 2)))
+    bars = ax.barh(y_labels, deltas, color=colors, alpha=0.9)
+    ax.axvline(0.0, color="#444444", linewidth=1)
+    ax.set_xlabel(f"Mean Accuracy Delta ({primary_label} - {compare_label})")
+    ax.set_ylabel("Context Prompt ID")
+    ax.set_title(f"Largest Context Prompt Gaps | Top {len(rows)} by |delta|")
+    ax.grid(axis="x", alpha=0.3)
+    ax.invert_yaxis()
+    ax.bar_label(bars, labels=[f"{delta:.3f}" for delta in deltas], padding=3, fontsize=8)
+
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    plt.tight_layout()
+    plt.savefig(output_path, dpi=300, bbox_inches="tight")
+    plt.close(fig)
+
+
 def plot_heatmap(
     matrix: np.ndarray,
     prompt_rows: list[dict],
@@ -238,10 +416,13 @@ def main() -> None:
     parser.add_argument("--required_verbalizer_prompt", type=str, default=None)
     parser.add_argument("--act_key", type=str, default="lora")
     parser.add_argument("--top_k", type=int, default=15)
+    parser.add_argument("--compare_json_dir", type=str, default=None)
+    parser.add_argument("--primary_label", type=str, default=None)
+    parser.add_argument("--compare_label", type=str, default=None)
     parser.add_argument(
         "--mode",
         type=str,
-        choices=["heatmap", "top_bottom", "both"],
+        choices=["heatmap", "top_bottom", "both", "compare", "compare_only"],
         default="both",
     )
     args = parser.parse_args()
@@ -261,9 +442,10 @@ def main() -> None:
     token_or_seq = "sequence" if args.sequence else "token"
     base_name = f"taboo_context_prompt_performance_{sanitize_name(model_name)}_{data_dir_label}_{token_or_seq}_{args.act_key}"
 
-    csv_path = Path(args.output_dir) / f"{base_name}.csv"
-    save_prompt_csv(csv_path, prompt_rows, column_keys)
-    print(f"Saved CSV: {csv_path}")
+    if args.mode != "compare_only":
+        csv_path = Path(args.output_dir) / f"{base_name}.csv"
+        save_prompt_csv(csv_path, prompt_rows, column_keys)
+        print(f"Saved CSV: {csv_path}")
 
     if args.mode in ("heatmap", "both"):
         heatmap_path = Path(args.output_dir) / f"{base_name}_heatmap.png"
@@ -287,6 +469,62 @@ def main() -> None:
             top_k=args.top_k,
         )
         print(f"Saved: {top_bottom_path}")
+
+    if args.compare_json_dir is not None or args.mode in ("compare", "compare_only"):
+        if args.compare_json_dir is None:
+            raise ValueError("--compare_json_dir is required for compare or compare_only mode")
+
+        compare_json_dir = Path(args.compare_json_dir)
+        if not compare_json_dir.exists():
+            raise ValueError(f"compare_json_dir does not exist: {compare_json_dir}")
+
+        compare_model_name, compare_column_keys, compare_prompt_rows = load_prompt_performance(
+            json_dir=compare_json_dir,
+            sequence=args.sequence,
+            required_verbalizer_prompt=args.required_verbalizer_prompt,
+            required_act_key=args.act_key,
+        )
+
+        if model_name != compare_model_name:
+            raise ValueError(f"Model mismatch: {model_name} != {compare_model_name}")
+        if column_keys != compare_column_keys:
+            raise ValueError("Column layout mismatch between primary and compare runs")
+
+        primary_label = args.primary_label or json_dir.name
+        compare_label = args.compare_label or compare_json_dir.name
+
+        aligned_rows, summary = compare_prompt_rows(
+            primary_prompt_rows=prompt_rows,
+            compare_prompt_rows=compare_prompt_rows,
+            primary_label=primary_label,
+            compare_label=compare_label,
+        )
+
+        compare_base_name = (
+            f"{base_name}_compare_{sanitize_name(primary_label)}_vs_{sanitize_name(compare_label)}"
+        )
+
+        compare_csv_path = Path(args.output_dir) / f"{compare_base_name}.csv"
+        save_compare_csv(compare_csv_path, aligned_rows)
+        print(f"Saved CSV: {compare_csv_path}")
+
+        compare_summary_path = Path(args.output_dir) / f"{compare_base_name}_summary.json"
+        save_compare_summary(compare_summary_path, summary)
+        print(f"Saved summary: {compare_summary_path}")
+
+        compare_scatter_path = Path(args.output_dir) / f"{compare_base_name}_scatter.png"
+        plot_compare_scatter(aligned_rows, summary, compare_scatter_path)
+        print(f"Saved: {compare_scatter_path}")
+
+        compare_gap_path = Path(args.output_dir) / f"{compare_base_name}_largest_gaps.png"
+        plot_prompt_gap_bars(
+            aligned_rows=aligned_rows,
+            primary_label=primary_label,
+            compare_label=compare_label,
+            output_path=compare_gap_path,
+            top_k=args.top_k,
+        )
+        print(f"Saved: {compare_gap_path}")
 
 
 if __name__ == "__main__":
