@@ -478,7 +478,7 @@ def main() -> None:
         if not compare_json_dir.exists():
             raise ValueError(f"compare_json_dir does not exist: {compare_json_dir}")
 
-        compare_model_name, compare_column_keys, compare_prompt_rows = load_prompt_performance(
+        compare_model_name, compare_column_keys, compare_rows = load_prompt_performance(
             json_dir=compare_json_dir,
             sequence=args.sequence,
             required_verbalizer_prompt=args.required_verbalizer_prompt,
@@ -495,7 +495,7 @@ def main() -> None:
 
         aligned_rows, summary = compare_prompt_rows(
             primary_prompt_rows=prompt_rows,
-            compare_prompt_rows=compare_prompt_rows,
+            compare_prompt_rows=compare_rows,
             primary_label=primary_label,
             compare_label=compare_label,
         )
