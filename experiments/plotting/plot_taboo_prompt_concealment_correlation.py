@@ -9,7 +9,7 @@ from pathlib import Path
 import matplotlib.pyplot as plt
 import numpy as np
 
-from analyze_taboo_context_prompt_taxonomy import classify_prompt
+from analyze_taboo_context_prompt_taxonomy import PRIMARY_CATEGORIES, classify_prompt
 from plot_taboo_eval_context_prompt_performance import (
     calculate_accuracy,
     compute_pearson,
@@ -203,6 +203,33 @@ def build_aligned_rows(secret_rows: list[dict], label_rows: list[dict]) -> tuple
     return aligned_rows, summary
 
 
+def aggregate_category_rows(aligned_rows: list[dict]) -> list[dict]:
+    category_rows = []
+    for category in PRIMARY_CATEGORIES:
+        rows = [row for row in aligned_rows if row["primary_category"] == category]
+        if len(rows) == 0:
+            continue
+
+        accuracy_values = np.array([row["secret_word_accuracy"] for row in rows], dtype=float)
+        concealment_values = np.array([row["concealment_label_rate"] for row in rows], dtype=float)
+        deception_values = np.array([row["deception_label_rate"] for row in rows], dtype=float)
+        guessing_values = np.array([row["guessing_label_rate"] for row in rows], dtype=float)
+
+        category_rows.append(
+            {
+                "category": category,
+                "num_prompts": len(rows),
+                "mean_secret_word_accuracy": float(accuracy_values.mean()),
+                "mean_secret_word_error_rate": float((1.0 - accuracy_values).mean()),
+                "mean_concealment_label_rate": float(concealment_values.mean()),
+                "mean_deception_label_rate": float(deception_values.mean()),
+                "mean_guessing_label_rate": float(guessing_values.mean()),
+            }
+        )
+
+    return category_rows
+
+
 def save_alignment_csv(output_path: Path, aligned_rows: list[dict]) -> None:
     output_path.parent.mkdir(parents=True, exist_ok=True)
     fieldnames = [
@@ -223,6 +250,25 @@ def save_alignment_csv(output_path: Path, aligned_rows: list[dict]) -> None:
         writer = csv.DictWriter(f, fieldnames=fieldnames)
         writer.writeheader()
         for row in sorted(aligned_rows, key=lambda item: item["secret_word_accuracy"], reverse=True):
+            writer.writerow({field: row[field] for field in fieldnames})
+
+
+def save_category_csv(output_path: Path, category_rows: list[dict]) -> None:
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    fieldnames = [
+        "category",
+        "num_prompts",
+        "mean_secret_word_accuracy",
+        "mean_secret_word_error_rate",
+        "mean_concealment_label_rate",
+        "mean_deception_label_rate",
+        "mean_guessing_label_rate",
+    ]
+
+    with open(output_path, "w", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        writer.writeheader()
+        for row in category_rows:
             writer.writerow({field: row[field] for field in fieldnames})
 
 
@@ -265,6 +311,124 @@ def plot_accuracy_concealment_scatter(
     plt.close(fig)
 
 
+def plot_compare_correlation_scatter(
+    primary_aligned_rows: list[dict],
+    primary_summary: dict,
+    primary_label: str,
+    compare_aligned_rows: list[dict],
+    compare_summary: dict,
+    compare_label: str,
+    output_path: Path,
+) -> None:
+    fig, axes = plt.subplots(1, 2, figsize=(16, 7), sharex=True, sharey=True)
+    plot_specs = [
+        (axes[0], primary_aligned_rows, primary_summary, primary_label, "#1f77b4"),
+        (axes[1], compare_aligned_rows, compare_summary, compare_label, "#ff7f0e"),
+    ]
+
+    for ax, rows, summary, run_label, color in plot_specs:
+        x_values = np.array([row["secret_word_accuracy"] for row in rows], dtype=float)
+        y_values = np.array([row["concealment_label_rate"] for row in rows], dtype=float)
+        slope, intercept = np.polyfit(x_values, y_values, 1)
+        fit_x = np.linspace(0.0, 1.0, 200)
+        fit_y = slope * fit_x + intercept
+
+        ax.scatter(x_values, y_values, alpha=0.75, s=40, color=color)
+        ax.plot(fit_x, fit_y, linestyle="--", color="#444444", linewidth=1.5)
+        ax.set_xlim(0.0, 1.05)
+        ax.set_ylim(0.0, 1.05)
+        ax.set_xlabel("Prompt-level secret-word accuracy")
+        ax.set_ylabel("Prompt-level concealment-label rate")
+        ax.set_title(
+            f"{run_label}\n"
+            f"Pearson={summary['pearson_accuracy_vs_concealment']:.3f}, "
+            f"Spearman={summary['spearman_accuracy_vs_concealment']:.3f}"
+        )
+        ax.grid(alpha=0.3)
+
+    fig.suptitle("Secret-Word Accuracy vs Concealment Labels")
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    plt.tight_layout()
+    plt.savefig(output_path, dpi=300, bbox_inches="tight")
+    plt.close(fig)
+
+
+def plot_category_relationship(
+    category_rows: list[dict],
+    run_label: str,
+    output_path: Path,
+) -> None:
+    fig, ax = plt.subplots(figsize=(9, 8))
+
+    x_values = np.array([row["mean_secret_word_accuracy"] for row in category_rows], dtype=float)
+    y_values = np.array([row["mean_concealment_label_rate"] for row in category_rows], dtype=float)
+    sizes = np.array([row["num_prompts"] for row in category_rows], dtype=float) * 22.0
+
+    ax.scatter(x_values, y_values, s=sizes, alpha=0.75, color="#1f77b4")
+    for row in category_rows:
+        ax.annotate(
+            row["category"],
+            (row["mean_secret_word_accuracy"], row["mean_concealment_label_rate"]),
+            xytext=(5, 5),
+            textcoords="offset points",
+            fontsize=8,
+        )
+
+    ax.set_xlim(0.0, 1.05)
+    ax.set_ylim(0.0, 1.05)
+    ax.set_xlabel("Category mean secret-word accuracy")
+    ax.set_ylabel("Category mean concealment-label rate")
+    ax.set_title(f"Category-Level Concealment vs Accuracy | {run_label}")
+    ax.grid(alpha=0.3)
+
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    plt.tight_layout()
+    plt.savefig(output_path, dpi=300, bbox_inches="tight")
+    plt.close(fig)
+
+
+def plot_compare_category_relationship(
+    primary_category_rows: list[dict],
+    primary_label: str,
+    compare_category_rows: list[dict],
+    compare_label: str,
+    output_path: Path,
+) -> None:
+    fig, axes = plt.subplots(1, 2, figsize=(17, 7), sharex=True, sharey=True)
+    plot_specs = [
+        (axes[0], primary_category_rows, primary_label, "#1f77b4"),
+        (axes[1], compare_category_rows, compare_label, "#ff7f0e"),
+    ]
+
+    for ax, category_rows, run_label, color in plot_specs:
+        x_values = np.array([row["mean_secret_word_accuracy"] for row in category_rows], dtype=float)
+        y_values = np.array([row["mean_concealment_label_rate"] for row in category_rows], dtype=float)
+        sizes = np.array([row["num_prompts"] for row in category_rows], dtype=float) * 22.0
+
+        ax.scatter(x_values, y_values, s=sizes, alpha=0.75, color=color)
+        for row in category_rows:
+            ax.annotate(
+                row["category"],
+                (row["mean_secret_word_accuracy"], row["mean_concealment_label_rate"]),
+                xytext=(5, 5),
+                textcoords="offset points",
+                fontsize=8,
+            )
+
+        ax.set_xlim(0.0, 1.05)
+        ax.set_ylim(0.0, 1.05)
+        ax.set_xlabel("Category mean secret-word accuracy")
+        ax.set_ylabel("Category mean concealment-label rate")
+        ax.set_title(run_label)
+        ax.grid(alpha=0.3)
+
+    fig.suptitle("Category-Level Concealment vs Accuracy")
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    plt.tight_layout()
+    plt.savefig(output_path, dpi=300, bbox_inches="tight")
+    plt.close(fig)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument(
@@ -279,8 +443,11 @@ def main() -> None:
         required=True,
         help="Directory containing the concept_intent taboo_open_ended_eval results",
     )
+    parser.add_argument("--compare_secret_json_dir", type=str, default=None)
+    parser.add_argument("--compare_concept_json_dir", type=str, default=None)
     parser.add_argument("--output_dir", type=str, default="./images/taboo_context_prompt_correlation")
     parser.add_argument("--label", type=str, default=None)
+    parser.add_argument("--compare_label", type=str, default=None)
     parser.add_argument("--output_stem", type=str, default=None)
     parser.add_argument("--act_key", type=str, default="lora")
     parser.add_argument(
@@ -314,6 +481,17 @@ def main() -> None:
         raise ValueError(f"secret_json_dir does not exist: {secret_json_dir}")
     if not concept_json_dir.exists():
         raise ValueError(f"concept_json_dir does not exist: {concept_json_dir}")
+    compare_secret_json_dir = None
+    compare_concept_json_dir = None
+    if args.compare_secret_json_dir is not None or args.compare_concept_json_dir is not None:
+        if args.compare_secret_json_dir is None or args.compare_concept_json_dir is None:
+            raise ValueError("compare_secret_json_dir and compare_concept_json_dir must be provided together")
+        compare_secret_json_dir = Path(args.compare_secret_json_dir)
+        compare_concept_json_dir = Path(args.compare_concept_json_dir)
+        if not compare_secret_json_dir.exists():
+            raise ValueError(f"compare_secret_json_dir does not exist: {compare_secret_json_dir}")
+        if not compare_concept_json_dir.exists():
+            raise ValueError(f"compare_concept_json_dir does not exist: {compare_concept_json_dir}")
 
     run_label = args.label or infer_run_label(secret_json_dir, "run")
     token_or_seq = "sequence" if args.sequence else "token"
@@ -331,6 +509,7 @@ def main() -> None:
         response_type=args.response_type,
     )
     aligned_rows, summary = build_aligned_rows(secret_rows, label_rows)
+    category_rows = aggregate_category_rows(aligned_rows)
 
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -343,6 +522,10 @@ def main() -> None:
     csv_path = output_dir / f"{stem}.csv"
     save_alignment_csv(csv_path, aligned_rows)
     print(f"Saved CSV: {csv_path}")
+
+    category_csv_path = output_dir / f"{stem}_category_summary.csv"
+    save_category_csv(category_csv_path, category_rows)
+    print(f"Saved category CSV: {category_csv_path}")
 
     summary_path = output_dir / f"{stem}_summary.json"
     save_summary_json(
@@ -364,6 +547,55 @@ def main() -> None:
     scatter_path = output_dir / f"{stem}_scatter.png"
     plot_accuracy_concealment_scatter(aligned_rows, summary, run_label, scatter_path)
     print(f"Saved: {scatter_path}")
+
+    category_scatter_path = output_dir / f"{stem}_category_relationship.png"
+    plot_category_relationship(category_rows, run_label, category_scatter_path)
+    print(f"Saved: {category_scatter_path}")
+
+    if compare_secret_json_dir is not None and compare_concept_json_dir is not None:
+        compare_label = args.compare_label or infer_run_label(compare_secret_json_dir, "compare")
+
+        compare_secret_rows = load_secret_prompt_rows(
+            json_dir=compare_secret_json_dir,
+            sequence=args.sequence,
+            required_verbalizer_prompt=args.required_secret_verbalizer_prompt,
+            required_act_key=args.act_key,
+        )
+        compare_label_rows = load_label_rates(
+            json_dir=compare_concept_json_dir,
+            required_verbalizer_prompt=args.required_concept_verbalizer_prompt,
+            required_act_key=args.act_key,
+            response_type=args.response_type,
+        )
+        compare_aligned_rows, compare_summary = build_aligned_rows(compare_secret_rows, compare_label_rows)
+        compare_category_rows = aggregate_category_rows(compare_aligned_rows)
+
+        compare_stem = (
+            f"{stem}_vs_"
+            f"{sanitize_name(compare_label)}"
+        )
+
+        compare_scatter_path = output_dir / f"{compare_stem}_compare_scatter.png"
+        plot_compare_correlation_scatter(
+            primary_aligned_rows=aligned_rows,
+            primary_summary=summary,
+            primary_label=run_label,
+            compare_aligned_rows=compare_aligned_rows,
+            compare_summary=compare_summary,
+            compare_label=compare_label,
+            output_path=compare_scatter_path,
+        )
+        print(f"Saved: {compare_scatter_path}")
+
+        compare_category_path = output_dir / f"{compare_stem}_category_relationship.png"
+        plot_compare_category_relationship(
+            primary_category_rows=category_rows,
+            primary_label=run_label,
+            compare_category_rows=compare_category_rows,
+            compare_label=compare_label,
+            output_path=compare_category_path,
+        )
+        print(f"Saved: {compare_category_path}")
 
 
 if __name__ == "__main__":
