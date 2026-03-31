@@ -286,7 +286,7 @@ def main() -> None:
     model_name_str = sanitize_name(config["model_name"].split("/")[-1])
     lang_suffix = f"_{config['lang_type']}" if config["lang_type"] else ""
     default_output_dir = (
-        Path("experiments/plotting/images")
+        Path("./images")
         / "taboo_hider_guesser_direct_similarity"
         / f"{model_name_str}_{config['prompt_type']}{lang_suffix}_{config['dataset_type']}"
     )
