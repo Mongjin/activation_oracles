@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 
 import matplotlib.pyplot as plt
+from plot_taboo_eval_context_prompt_performance import load_prompt_performance
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
@@ -200,11 +201,15 @@ def build_context_prompt_rows(
 def save_context_prompt_csv(
     prompt_rows: list[dict],
     layer_percents: list[int],
+    include_hider_secret_accuracy: bool,
+    include_guesser_secret_accuracy: bool,
     output_path: Path,
 ) -> None:
-    fieldnames = ["prompt_id", "overall_mean", "prompt_text", "raw_context_prompt"] + [
-        f"layer_{layer_percent}" for layer_percent in layer_percents
-    ]
+    fieldnames = ["prompt_id", "overall_mean", "prompt_text"] + [f"layer_{layer_percent}" for layer_percent in layer_percents]
+    if include_hider_secret_accuracy:
+        fieldnames += [f"hider_secret_accuracy_layer_{layer_percent}" for layer_percent in layer_percents]
+    if include_guesser_secret_accuracy:
+        fieldnames += [f"guesser_secret_accuracy_layer_{layer_percent}" for layer_percent in layer_percents]
 
     with open(output_path, "w", newline="", encoding="utf-8") as f:
         writer = csv.DictWriter(f, fieldnames=fieldnames)
@@ -214,11 +219,58 @@ def save_context_prompt_csv(
                 "prompt_id": row["prompt_id"],
                 "overall_mean": row["overall_mean"],
                 "prompt_text": row["prompt_text"],
-                "raw_context_prompt": row["prompt_text"],
             }
             for layer_percent in layer_percents:
                 csv_row[f"layer_{layer_percent}"] = row["layer_means"][layer_percent]
+            if include_hider_secret_accuracy:
+                for layer_percent in layer_percents:
+                    csv_row[f"hider_secret_accuracy_layer_{layer_percent}"] = row["hider_secret_accuracy_by_layer"][layer_percent]
+            if include_guesser_secret_accuracy:
+                for layer_percent in layer_percents:
+                    csv_row[f"guesser_secret_accuracy_layer_{layer_percent}"] = row["guesser_secret_accuracy_by_layer"][layer_percent]
             writer.writerow(csv_row)
+
+
+def load_layer_mean_secret_accuracy_by_prompt(
+    json_dir: Path,
+    required_verbalizer_prompt: str | None,
+    act_key: str,
+    sequence: bool,
+) -> dict[str, dict[int, float]]:
+    _, column_keys, prompt_rows = load_prompt_performance(
+        json_dir=json_dir,
+        sequence=sequence,
+        required_verbalizer_prompt=required_verbalizer_prompt,
+        required_act_key=act_key,
+    )
+
+    layer_percents = sorted({layer_percent for layer_percent, _ in column_keys})
+    prompt_map = {}
+    for row in prompt_rows:
+        layer_means = {}
+        for layer_percent in layer_percents:
+            values = [row["row_means"][(lp, lora_key)] for lp, lora_key in column_keys if lp == layer_percent]
+            layer_means[layer_percent] = sum(values) / len(values)
+        prompt_map[row["prompt_text"]] = layer_means
+    return prompt_map
+
+
+def attach_secret_accuracy_columns(
+    prompt_rows: list[dict],
+    layer_percents: list[int],
+    hider_secret_accuracy_by_prompt: dict[str, dict[int, float]] | None,
+    guesser_secret_accuracy_by_prompt: dict[str, dict[int, float]] | None,
+) -> None:
+    for row in prompt_rows:
+        prompt_text = row["prompt_text"]
+        if hider_secret_accuracy_by_prompt is not None:
+            row["hider_secret_accuracy_by_layer"] = {
+                layer_percent: hider_secret_accuracy_by_prompt[prompt_text][layer_percent] for layer_percent in layer_percents
+            }
+        if guesser_secret_accuracy_by_prompt is not None:
+            row["guesser_secret_accuracy_by_layer"] = {
+                layer_percent: guesser_secret_accuracy_by_prompt[prompt_text][layer_percent] for layer_percent in layer_percents
+            }
 
 
 def draw_context_prompt_heatmap(
@@ -280,13 +332,18 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--input_json", type=str, required=True)
     parser.add_argument("--output_dir", type=str, default=None)
+    parser.add_argument("--hider_secret_json_dir", type=str, default=None)
+    parser.add_argument("--guesser_secret_json_dir", type=str, default=None)
+    parser.add_argument("--required_secret_verbalizer_prompt", type=str, default=None)
+    parser.add_argument("--secret_act_key", type=str, default="lora")
+    parser.add_argument("--secret_sequence", action="store_true")
     args = parser.parse_args()
 
     config, layer_percents, target_words, context_prompts, layers = load_summary(args.input_json)
     model_name_str = sanitize_name(config["model_name"].split("/")[-1])
     lang_suffix = f"_{config['lang_type']}" if config["lang_type"] else ""
     default_output_dir = (
-        Path("./images")
+        Path("experiments/plotting/images")
         / "taboo_hider_guesser_direct_similarity"
         / f"{model_name_str}_{config['prompt_type']}{lang_suffix}_{config['dataset_type']}"
     )
@@ -329,9 +386,35 @@ def main() -> None:
         target_words=target_words,
         context_prompts=context_prompts,
     )
+
+    hider_secret_accuracy_by_prompt = None
+    guesser_secret_accuracy_by_prompt = None
+    if args.hider_secret_json_dir is not None:
+        hider_secret_accuracy_by_prompt = load_layer_mean_secret_accuracy_by_prompt(
+            json_dir=Path(args.hider_secret_json_dir),
+            required_verbalizer_prompt=args.required_secret_verbalizer_prompt,
+            act_key=args.secret_act_key,
+            sequence=args.secret_sequence,
+        )
+    if args.guesser_secret_json_dir is not None:
+        guesser_secret_accuracy_by_prompt = load_layer_mean_secret_accuracy_by_prompt(
+            json_dir=Path(args.guesser_secret_json_dir),
+            required_verbalizer_prompt=args.required_secret_verbalizer_prompt,
+            act_key=args.secret_act_key,
+            sequence=args.secret_sequence,
+        )
+    attach_secret_accuracy_columns(
+        prompt_rows=context_prompt_rows,
+        layer_percents=layer_percents,
+        hider_secret_accuracy_by_prompt=hider_secret_accuracy_by_prompt,
+        guesser_secret_accuracy_by_prompt=guesser_secret_accuracy_by_prompt,
+    )
+
     save_context_prompt_csv(
         prompt_rows=context_prompt_rows,
         layer_percents=layer_percents,
+        include_hider_secret_accuracy=hider_secret_accuracy_by_prompt is not None,
+        include_guesser_secret_accuracy=guesser_secret_accuracy_by_prompt is not None,
         output_path=output_dir / "context_prompt_mean_cosine_by_layer.csv",
     )
     draw_context_prompt_heatmap(
