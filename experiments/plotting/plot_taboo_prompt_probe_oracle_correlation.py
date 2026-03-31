@@ -307,7 +307,7 @@ def main() -> None:
     lang_suffix = f"_{probe_data['config']['lang_type']}" if probe_data["config"]["lang_type"] else ""
     oracle_mode = "sequence" if args.sequence else "token"
     default_output_dir = (
-        Path("experiments/plotting/images")
+        Path("./images")
         / "taboo_prompt_probe_oracle_correlation"
         / f"{model_name_str}_{probe_data['config']['prompt_type']}{lang_suffix}_{probe_data['config']['dataset_type']}"
     )

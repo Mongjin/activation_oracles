@@ -199,7 +199,7 @@ def main() -> None:
     model_name_str = sanitize_name(data["config"]["model_name"].split("/")[-1])
     lang_suffix = f"_{data['config']['lang_type']}" if data["config"]["lang_type"] else ""
     default_output_dir = (
-        Path("experiments/plotting/images")
+        Path("./images")
         / "taboo_context_prompt_probe_taxonomy"
         / f"{model_name_str}_{data['config']['prompt_type']}{lang_suffix}_{data['config']['dataset_type']}"
     )
