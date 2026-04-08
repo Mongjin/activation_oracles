@@ -31,11 +31,13 @@ if __name__ == "__main__":
     parser.add_argument("--FT_role_swap", action='store_true', default=False)
     parser.add_argument("--layer_percents", type=int, nargs="+", default=[25, 50, 75])
     parser.add_argument("--prompt_type", type=str, default="all_direct", choices=["all_direct", "all_standard", "baseline", "synonym"])
+    parser.add_argument("--model_name", type=str, default='google/gemma-2-9b-it')
     args = parser.parse_args()
 
     # Model and dtype
     # model_name = "Qwen/Qwen3-8B"
-    model_name = "google/gemma-2-9b-it"
+    # model_name = "google/gemma-2-9b-it"
+    model_name = args.model_name
     model_name_str = model_name.split("/")[-1].replace(".", "_")
 
     random.seed(42)
