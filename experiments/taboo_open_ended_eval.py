@@ -133,6 +133,11 @@ if __name__ == "__main__":
     lang_suffix = f"_{LANG_TYPE}" if LANG_TYPE else ""
     output_json_dir: str = f"{experiments_dir}/{model_name_str}_open_ended_{PROMPT_TYPE}{lang_suffix}_{DATASET_TYPE}"
 
+    if args.verbalize_prompt != "secret_word":
+        output_json_dir += f"_{args.verbalize_prompt}"
+    if args.FT_role_swap:
+        output_json_dir += "_swapped"
+
     os.makedirs(experiments_dir, exist_ok=True)
     os.makedirs(output_json_dir, exist_ok=True)
     # Optional: save results to disk as JSON
