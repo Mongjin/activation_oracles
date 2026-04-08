@@ -83,6 +83,8 @@ if __name__ == "__main__":
             "adamkarvonen/checkpoints_cls_latentqa_sae_addition_Qwen3-8B",
         ]
         target_lora_path_template: Optional[str] = "adamkarvonen/Qwen3-8B-taboo-{lora_path}_50_mix"
+        if args.FT_role_swap:
+            target_lora_path_template: Optional[str] = "/home/mongjin/activation_oracles/nl_probes/trl_training/model_lora_role_swapped/Qwen3-8B-taboo-{lora_path}-role-swapped"
         segment_start = -10
     elif model_name == "google/gemma-2-9b-it":
         verbalizer_lora_paths = [
