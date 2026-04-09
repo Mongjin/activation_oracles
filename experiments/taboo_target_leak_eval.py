@@ -456,7 +456,7 @@ if __name__ == "__main__":
 
     lang_suffix = f"_{config.lang_type}" if config.lang_type else ""
     output_json_dir = (
-        f"{args.output_dir}/{model_name_str}_target_leak_{config.prompt_type}{lang_suffix}_{config.dataset_type}"
+        f"{args.output_dir}/{model_name_str}_target_leak_{config.prompt_type}{lang_suffix}_{config.dataset_type}_{args.model_type}"
     )
     os.makedirs(output_json_dir, exist_ok=True)
 
