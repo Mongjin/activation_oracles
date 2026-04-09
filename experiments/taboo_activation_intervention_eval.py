@@ -173,6 +173,10 @@ def collect_intervention_activations_for_batch(
         intervention_acts = guesser_acts + intervention_scale * difference
     elif experiment == "exp2":
         intervention_acts = hider_acts - intervention_scale * difference
+    elif experiment == "exp3":
+        intervention_acts = hider_acts_for_diff - guesser_acts_for_diff
+    elif experiment == "exp4":
+        intervention_acts = hider_acts_for_diff + guesser_acts_for_diff
     else:
         raise ValueError(f"Unsupported experiment: {experiment}")
 
@@ -377,7 +381,7 @@ if __name__ == "__main__":
         default="secret_word",
         choices=["secret_word", "concept", "intent", "concept_intent"],
     )
-    parser.add_argument("--experiment", type=str, required=True, choices=["exp1", "exp2"])
+    parser.add_argument("--experiment", type=str, required=True, choices=["exp1", "exp2", "exp3", "exp4"])
     parser.add_argument("--intervention_scale", type=float, default=1.0)
     parser.add_argument("--difference_mode", type=str, default="raw", choices=["raw", "unit"])
     parser.add_argument("--target_words", type=str, nargs="+", default=None)
