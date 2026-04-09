@@ -442,7 +442,7 @@ if __name__ == "__main__":
 
     experiments_dir = args.output_dir
     lang_suffix = f"_{args.lang_type}" if args.lang_type else ""
-    output_json_dir = f"{experiments_dir}/{model_name_str}_activation_intervention_{args.prompt_type}{lang_suffix}_{args.dataset_type}"
+    output_json_dir = f"{experiments_dir}/{model_name_str}_activation_intervention_{args.prompt_type}{lang_suffix}_{args.dataset_type}_{args.experiment}_{args.intervention_scale}"
     os.makedirs(experiments_dir, exist_ok=True)
     os.makedirs(output_json_dir, exist_ok=True)
     output_json_template = f"{output_json_dir}/taboo_activation_intervention" + "_{lora}.json"
