@@ -17,7 +17,7 @@ CUSTOM_LABELS = {
     "checkpoints_cls_only_addition_Qwen3-8B": "Classification",
     "checkpoints_latentqa_cls_past_lens_addition_Qwen3-8B": "Past Lens + Classification + LatentQA",
     "checkpoints_cls_latentqa_sae_addition_Qwen3-8B": "SAE + Classification + LatentQA",
-    "base_model": "Base Model",
+    # "base_model": "Base Model",
 }
 
 
