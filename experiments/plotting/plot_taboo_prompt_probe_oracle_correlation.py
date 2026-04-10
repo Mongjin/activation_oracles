@@ -20,6 +20,10 @@ DEFAULT_PROBE_METRICS = [
     "linear_top1_acc",
     "mlp_target_prob_mean",
     "mlp_top1_acc",
+    "binary_linear_target_prob_mean",
+    "binary_linear_positive_recall",
+    "binary_mlp_target_prob_mean",
+    "binary_mlp_positive_recall",
 ]
 
 
