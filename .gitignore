@@ -205,3 +205,4 @@ experiments/taboo_eval_results/*intervention*
 experiments/taboo_eval_results/taboo_probe*
 experiments/taboo_eval_results/*hider_activation_cosine*
 experiments/taboo_eval_results/gemma-2-9b-it_context_prompt_probe_all_direct_test/*
+experiments/taboo_eval_results/*hplo*
