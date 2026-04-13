@@ -472,7 +472,7 @@ def main() -> None:
     suffix = parse_alignment_filename(next(iter(discovered[args.source_names[0]].values())))[2]
 
     default_output_dir = (
-        Path("experiments/plotting/images")
+        Path("./images")
         / "taboo_prompt_hplo_hpho_groups"
         / f"{sanitize_name(input_dir.name)}_{sanitize_name(args.probe_metric)}"
     )
