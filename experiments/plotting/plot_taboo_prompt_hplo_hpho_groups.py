@@ -17,6 +17,11 @@ GROUP_COLORS = {
     "HIGH_PROBE_MID": "#1f77b4",
     "NON_HIGH_PROBE": "#bdbdbd",
 }
+ORACLE_OVERLAP_COLORS = {
+    "TOP20_OVERLAP": "#ffd92f",
+    "BOTTOM20_OVERLAP": "#ff7f0e",
+    "OTHER": "#bdbdbd",
+}
 
 
 def parse_alignment_filename(csv_path: Path) -> tuple[str, int, str]:
@@ -180,6 +185,73 @@ def draw_group_scatter(
             s=45,
             color=GROUP_COLORS[group_label],
             label=f"{group_label} (n={len(rows)})",
+        )
+
+    order = np.argsort(probe_scores)
+    ax.plot(probe_scores[order], predicted[order], color="black", linewidth=1.8, label="Oracle ~ probe fit")
+    ax.set_title(title)
+    ax.set_xlabel("Probe score")
+    ax.set_ylabel("Oracle secret-word accuracy")
+    ax.grid(alpha=0.3)
+    ax.legend(loc="best")
+
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    plt.tight_layout()
+    plt.savefig(output_path, dpi=300, bbox_inches="tight")
+    plt.close(fig)
+
+
+def get_top_bottom_overlap_sets(
+    source_a_rows: list[dict],
+    source_b_rows: list[dict],
+    top_k: int,
+    bottom_k: int,
+) -> tuple[set[str], set[str]]:
+    sorted_a = sorted(source_a_rows, key=lambda row: row["oracle_accuracy"], reverse=True)
+    sorted_b = sorted(source_b_rows, key=lambda row: row["oracle_accuracy"], reverse=True)
+
+    top_a = {row["prompt_text"] for row in sorted_a[:top_k]}
+    top_b = {row["prompt_text"] for row in sorted_b[:top_k]}
+    bottom_a = {row["prompt_text"] for row in sorted_a[-bottom_k:]}
+    bottom_b = {row["prompt_text"] for row in sorted_b[-bottom_k:]}
+
+    return top_a & top_b, bottom_a & bottom_b
+
+
+def draw_oracle_overlap_scatter(
+    grouped_rows: list[dict],
+    top_overlap_prompts: set[str],
+    bottom_overlap_prompts: set[str],
+    output_path: Path,
+    title: str,
+) -> None:
+    fig, ax = plt.subplots(figsize=(8.5, 6.5))
+    probe_scores = np.array([row["probe_score"] for row in grouped_rows], dtype=float)
+    predicted = np.array([row["predicted_oracle_accuracy"] for row in grouped_rows], dtype=float)
+
+    top_rows = [row for row in grouped_rows if row["prompt_text"] in top_overlap_prompts]
+    bottom_rows = [row for row in grouped_rows if row["prompt_text"] in bottom_overlap_prompts]
+    other_rows = [
+        row for row in grouped_rows
+        if row["prompt_text"] not in top_overlap_prompts and row["prompt_text"] not in bottom_overlap_prompts
+    ]
+
+    plot_groups = [
+        ("Top-20 Oracle overlap", top_rows, ORACLE_OVERLAP_COLORS["TOP20_OVERLAP"]),
+        ("Bottom-20 Oracle overlap", bottom_rows, ORACLE_OVERLAP_COLORS["BOTTOM20_OVERLAP"]),
+        ("Other prompts", other_rows, ORACLE_OVERLAP_COLORS["OTHER"]),
+    ]
+
+    for label, rows, color in plot_groups:
+        if len(rows) == 0:
+            continue
+        ax.scatter(
+            [row["probe_score"] for row in rows],
+            [row["oracle_accuracy"] for row in rows],
+            alpha=0.88 if label != "Other prompts" else 0.65,
+            s=48 if label != "Other prompts" else 36,
+            color=color,
+            label=f"{label} (n={len(rows)})",
         )
 
     order = np.argsort(probe_scores)
@@ -400,7 +472,7 @@ def main() -> None:
     suffix = parse_alignment_filename(next(iter(discovered[args.source_names[0]].values())))[2]
 
     default_output_dir = (
-        Path("./images")
+        Path("experiments/plotting/images")
         / "taboo_prompt_hplo_hpho_groups"
         / f"{sanitize_name(input_dir.name)}_{sanitize_name(args.probe_metric)}"
     )
@@ -443,6 +515,28 @@ def main() -> None:
     cross_source_details = {}
     shared_layers = sorted(set(grouped_data[source_a_name].keys()) & set(grouped_data[source_b_name].keys()))
     for layer_percent in shared_layers:
+        top_overlap_prompts, bottom_overlap_prompts = get_top_bottom_overlap_sets(
+            source_a_rows=grouped_data[source_a_name][layer_percent],
+            source_b_rows=grouped_data[source_b_name][layer_percent],
+            top_k=20,
+            bottom_k=20,
+        )
+
+        for source_name in args.source_names:
+            oracle_overlap_scatter_path = output_dir / (
+                f"hplo_hpho_oracle_overlap_{source_name}_layer_{layer_percent}_{sanitize_name(args.probe_metric)}_{suffix}.png"
+            )
+            draw_oracle_overlap_scatter(
+                grouped_rows=grouped_data[source_name][layer_percent],
+                top_overlap_prompts=top_overlap_prompts,
+                bottom_overlap_prompts=bottom_overlap_prompts,
+                output_path=oracle_overlap_scatter_path,
+                title=(
+                    f"{source_name} | Layer {layer_percent}% | {args.probe_metric}\n"
+                    "Yellow: shared top-20 Oracle prompts, Orange: shared bottom-20 Oracle prompts"
+                ),
+            )
+
         overlap_summary, aligned_rows = compute_group_overlap_and_residual_correlation(
             source_a_rows=grouped_data[source_a_name][layer_percent],
             source_b_rows=grouped_data[source_b_name][layer_percent],
@@ -450,6 +544,10 @@ def main() -> None:
             source_b_name=source_b_name,
         )
         overlap_summary["layer_percent"] = layer_percent
+        overlap_summary["oracle_top20_overlap_count"] = len(top_overlap_prompts)
+        overlap_summary["oracle_bottom20_overlap_count"] = len(bottom_overlap_prompts)
+        overlap_summary["oracle_top20_overlap_prompts"] = sorted(top_overlap_prompts)
+        overlap_summary["oracle_bottom20_overlap_prompts"] = sorted(bottom_overlap_prompts)
         overlap_rows.append(overlap_summary)
         cross_source_details[str(layer_percent)] = overlap_summary
 
@@ -488,6 +586,8 @@ def main() -> None:
             "hplo_jaccard",
             "hpho_overlap_count",
             "hpho_jaccard",
+            "oracle_top20_overlap_count",
+            "oracle_bottom20_overlap_count",
         ]
         writer = csv.DictWriter(f, fieldnames=fieldnames)
         writer.writeheader()
