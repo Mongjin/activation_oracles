@@ -54,6 +54,10 @@ def initialize_prompt_sums(prompt_texts: list[str], d_model: int) -> dict[str, t
     return {prompt_text: torch.zeros(d_model, dtype=torch.float32) for prompt_text in prompt_texts}
 
 
+def initialize_prompt_vector_lists(prompt_texts: list[str]) -> dict[str, list[torch.Tensor]]:
+    return {prompt_text: [] for prompt_text in prompt_texts}
+
+
 def compute_prompt_mean_vectors(
     model_name: str,
     source_name: str,
@@ -64,7 +68,7 @@ def compute_prompt_mean_vectors(
     hider_lora_path_arg: str | None,
     guesser_lora_path_arg: str | None,
     eval_batch_size: int,
-) -> tuple[dict[int, dict[str, torch.Tensor]], dict[int, dict[str, list[str]]]]:
+) -> tuple[dict[int, dict[str, torch.Tensor]], dict[int, dict[str, torch.Tensor]], dict[int, dict[str, list[str]]]]:
     layer_indices = [layer_percent_to_layer(model_name, layer_percent) for layer_percent in layer_percents]
     prompt_index_by_text = {prompt_text: idx for idx, prompt_text in enumerate(context_prompts)}
 
@@ -82,6 +86,7 @@ def compute_prompt_mean_vectors(
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     prompt_sums_by_layer = {}
+    prompt_vectors_by_layer = {}
     d_model = None
 
     for target_word in tqdm(secret_words, desc=f"Collect {source_name} context activations"):
@@ -105,6 +110,9 @@ def compute_prompt_mean_vectors(
                     group_metadata[layer_percent]["selected_prompts"],
                     d_model,
                 )
+                prompt_vectors_by_layer[layer_percent] = initialize_prompt_vector_lists(
+                    group_metadata[layer_percent]["selected_prompts"],
+                )
 
         context_acts = collect_context_prompt_last_token_activations(
             model=model,
@@ -118,7 +126,9 @@ def compute_prompt_mean_vectors(
         for layer_percent, layer_index in zip(layer_percents, layer_indices):
             for prompt_text in group_metadata[layer_percent]["selected_prompts"]:
                 prompt_idx = prompt_index_by_text[prompt_text]
-                prompt_sums_by_layer[layer_percent][prompt_text] += context_acts[layer_index][prompt_idx]
+                prompt_vector = context_acts[layer_index][prompt_idx]
+                prompt_sums_by_layer[layer_percent][prompt_text] += prompt_vector
+                prompt_vectors_by_layer[layer_percent][prompt_text].append(prompt_vector)
 
         del model
         if torch.cuda.is_available():
@@ -131,25 +141,34 @@ def compute_prompt_mean_vectors(
             for prompt_text, prompt_vector in prompt_sums_by_layer[layer_percent].items()
         }
 
-    return prompt_means_by_layer, group_metadata
+    prompt_target_vectors_by_layer = {}
+    for layer_percent in layer_percents:
+        prompt_target_vectors_by_layer[layer_percent] = {
+            prompt_text: torch.stack(prompt_vectors, dim=0)
+            for prompt_text, prompt_vectors in prompt_vectors_by_layer[layer_percent].items()
+        }
+
+    return prompt_target_vectors_by_layer, prompt_means_by_layer, group_metadata
 
 
 def compute_group_similarity_rows(
+    prompt_target_vectors: dict[str, torch.Tensor],
     prompt_mean_vectors: dict[str, torch.Tensor],
     hplo_prompts: list[str],
     hpho_prompts: list[str],
-) -> tuple[list[dict], dict[str, float], torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+) -> tuple[list[dict], dict[str, float], torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     ordered_prompts = hplo_prompts + hpho_prompts
     ordered_groups = ["HPLO"] * len(hplo_prompts) + ["HPHO"] * len(hpho_prompts)
-    vectors = torch.stack([prompt_mean_vectors[prompt_text] for prompt_text in ordered_prompts]).float()
-    normalized_vectors = F.normalize(vectors, dim=-1)
-    cosine_matrix = normalized_vectors @ normalized_vectors.T
+    target_vectors = torch.stack([prompt_target_vectors[prompt_text] for prompt_text in ordered_prompts]).float()
+    mean_vectors = torch.stack([prompt_mean_vectors[prompt_text] for prompt_text in ordered_prompts]).float()
+    normalized_target_vectors = F.normalize(target_vectors, dim=-1)
+    cosine_matrix = torch.einsum("pwd,qwd->pqw", normalized_target_vectors, normalized_target_vectors).mean(dim=-1)
 
     group_rows = []
     hplo_count = len(hplo_prompts)
     hpho_count = len(hpho_prompts)
-    hplo_vectors = vectors[:hplo_count]
-    hpho_vectors = vectors[hplo_count:]
+    hplo_vectors = mean_vectors[:hplo_count]
+    hpho_vectors = mean_vectors[hplo_count:]
 
     hplo_within_values = []
     hplo_cross_values = []
@@ -205,8 +224,9 @@ def compute_group_similarity_rows(
         "cosine_hplo_mean_vs_hpho_mean": float(
             F.cosine_similarity(hplo_mean.view(1, -1), hpho_mean.view(1, -1), dim=-1).item()
         ),
+        "similarity_mode": "mean_targetwise_prompt_cosine",
     }
-    return group_rows, summary, cosine_matrix, vectors, hplo_mean, hpho_mean, feature_raw, feature_unit
+    return group_rows, summary, cosine_matrix, mean_vectors, hplo_mean, hpho_mean, feature_raw, feature_unit
 
 
 def save_group_similarity_csv(output_path: Path, rows: list[dict]) -> None:
@@ -323,7 +343,7 @@ def main() -> None:
     summary_json = {"config": feature_tensors["config"], "sources": {}}
 
     for source_name in args.source_names:
-        prompt_means_by_layer, group_metadata = compute_prompt_mean_vectors(
+        prompt_target_vectors_by_layer, prompt_means_by_layer, group_metadata = compute_prompt_mean_vectors(
             model_name=model_name,
             source_name=source_name,
             secret_words=secret_words,
@@ -342,6 +362,7 @@ def main() -> None:
             hplo_prompts = group_metadata[layer_percent]["hplo_prompts"]
             hpho_prompts = group_metadata[layer_percent]["hpho_prompts"]
             group_rows, similarity_summary, _, _, hplo_mean, hpho_mean, feature_raw, feature_unit = compute_group_similarity_rows(
+                prompt_target_vectors=prompt_target_vectors_by_layer[layer_percent],
                 prompt_mean_vectors=prompt_means_by_layer[layer_percent],
                 hplo_prompts=hplo_prompts,
                 hpho_prompts=hpho_prompts,
