@@ -373,7 +373,7 @@ def main() -> None:
     parser.add_argument("--hider_lora_path", type=str, default=None)
     parser.add_argument("--guesser_lora_path", type=str, default=None)
     parser.add_argument("--eval_batch_size", type=int, default=64)
-    parser.add_argument("--output_dir", type=str, default="./experiments/taboo_eval_results")
+    parser.add_argument("--output_dir", type=str, default="./taboo_eval_results")
     args = parser.parse_args()
 
     probe_json = Path(args.probe_json)
