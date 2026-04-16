@@ -989,7 +989,7 @@ def main() -> None:
     parser.add_argument("--max_new_tokens", type=int, default=50)
     parser.add_argument("--temperature", type=float, default=0.0)
     parser.add_argument("--do_sample", action="store_true")
-    parser.add_argument("--oracle_input_type", type=str, default="last_token", choices=["last_token", "tokens"])
+    parser.add_argument("--oracle_input_type", type=str, default="tokens", choices=["last_token", "tokens"])
     parser.add_argument("--oracle_token_start_idx", type=int, default=-10)
     parser.add_argument("--oracle_token_end_idx", type=int, default=0)
     parser.add_argument("--oracle_token_eval_index", type=int, default=None)
