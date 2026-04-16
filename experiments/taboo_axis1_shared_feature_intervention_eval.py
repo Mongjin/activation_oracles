@@ -139,6 +139,7 @@ def collect_context_prompt_sequence_activations(
     layers: list[int],
     device: torch.device,
     eval_batch_size: int,
+    target_seq_len: int,
 ) -> dict[int, torch.Tensor]:
     submodules = {layer: get_hf_submodule(model, layer) for layer in layers}
     acts_by_layer = {layer: [] for layer in layers}
@@ -164,7 +165,16 @@ def collect_context_prompt_sequence_activations(
             )
 
         for layer in layers:
-            acts_by_layer[layer].append(batch_acts[layer].cpu().float())
+            layer_acts = batch_acts[layer].cpu().float()
+            batch_seq_len = int(layer_acts.shape[1])
+            if batch_seq_len > target_seq_len:
+                raise ValueError(
+                    f"Batch sequence length {batch_seq_len} exceeds target_seq_len {target_seq_len}"
+                )
+            if batch_seq_len < target_seq_len:
+                pad_len = target_seq_len - batch_seq_len
+                layer_acts = F.pad(layer_acts, (0, 0, pad_len, 0))
+            acts_by_layer[layer].append(layer_acts)
 
     return {layer: torch.cat(chunks, dim=0) for layer, chunks in acts_by_layer.items()}
 
@@ -182,6 +192,7 @@ def collect_source_activations(
     hider_lora_path_arg: str | None,
     guesser_lora_path_arg: str | None,
     collect_sequence_context_acts: bool,
+    context_target_seq_len: int,
 ) -> tuple[
     dict[int, list[torch.Tensor]],
     list[int],
@@ -239,6 +250,7 @@ def collect_source_activations(
                 layers=layers,
                 device=device,
                 eval_batch_size=context_eval_batch_size,
+                target_seq_len=context_target_seq_len,
             )
 
         del model
@@ -1032,6 +1044,7 @@ def main() -> None:
     dtype = torch.bfloat16
     tokenizer = load_tokenizer(args.model_name)
     prompt_infos = encode_context_prompt_infos(tokenizer=tokenizer, context_prompts=context_prompts, device=device)
+    context_target_seq_len = max(prompt_info["left_pad"] + prompt_info["num_tokens"] for prompt_info in prompt_infos)
 
     verbalizer_lora_paths = get_verbalizer_lora_paths(args.model_name)
     verbalizer_prompts = get_verbalizer_prompts(args.verbalize_prompt)
@@ -1055,6 +1068,7 @@ def main() -> None:
             hider_lora_path_arg=args.hider_lora_path,
             guesser_lora_path_arg=args.guesser_lora_path,
             collect_sequence_context_acts=args.oracle_input_type == "tokens",
+            context_target_seq_len=context_target_seq_len,
         )
         source_context_last_acts[source_name] = context_last_acts_by_word
         source_context_sequence_acts[source_name] = context_sequence_acts_by_word
