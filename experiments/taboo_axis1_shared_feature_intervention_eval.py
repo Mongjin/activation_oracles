@@ -812,7 +812,6 @@ def main() -> None:
     args = parser.parse_args()
 
     torch.manual_seed(args.seed)
-    torch.set_grad_enabled(False)
 
     secret_words = [word.strip() for word in args.secret_words.split(",")]
     layer_percents = args.layer_percents
