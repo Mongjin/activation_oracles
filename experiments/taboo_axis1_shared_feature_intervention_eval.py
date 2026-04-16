@@ -11,7 +11,7 @@ from peft import LoraConfig, PeftModel
 from tqdm import tqdm
 
 import nl_probes.base_experiment as base_experiment
-from nl_probes.utils.activation_utils import get_hf_submodule
+from nl_probes.utils.activation_utils import collect_activations_multiple_layers, get_hf_submodule
 from nl_probes.utils.common import layer_percent_to_layer, load_model, load_tokenizer
 from nl_probes.utils.dataset_utils import TrainingDataPoint, create_training_datapoint
 from nl_probes.utils.eval import run_evaluation
@@ -42,6 +42,15 @@ def sanitize_name(value: str) -> str:
 
 def normalize_vector(vector: torch.Tensor) -> torch.Tensor:
     return F.normalize(vector.view(1, -1), dim=-1).view(-1)
+
+
+def default_oracle_token_eval_index(model_name: str) -> int:
+    lower = model_name.lower()
+    if "gemma" in lower:
+        return -3
+    if "qwen" in lower:
+        return -7
+    raise ValueError(f"Unsupported model_name for default token eval index: {model_name}")
 
 
 def load_shared_group_prompts(feature_analysis_dir: Path, layer_percents: list[int]) -> dict[int, dict[str, list[str]]]:
@@ -115,10 +124,49 @@ def encode_context_prompt_infos(
                 "prompt_id": f"P{prompt_idx + 1:03d}",
                 "prompt_text": prompt_text,
                 "context_input_ids": context_input_ids,
+                "left_pad": left_pad,
+                "num_tokens": len(context_input_ids),
                 "last_pos_rel": last_pos_rel,
             }
         )
     return prompt_infos
+
+
+def collect_context_prompt_sequence_activations(
+    model,
+    tokenizer,
+    context_prompts: list[str],
+    layers: list[int],
+    device: torch.device,
+    eval_batch_size: int,
+) -> dict[int, torch.Tensor]:
+    submodules = {layer: get_hf_submodule(model, layer) for layer in layers}
+    acts_by_layer = {layer: [] for layer in layers}
+
+    for start in range(0, len(context_prompts), eval_batch_size):
+        batch_prompts = context_prompts[start : start + eval_batch_size]
+        batch_messages = [[{"role": "user", "content": prompt}] for prompt in batch_prompts]
+        inputs_BL = base_experiment.encode_messages(
+            tokenizer=tokenizer,
+            message_dicts=batch_messages,
+            add_generation_prompt=True,
+            enable_thinking=False,
+            device=device,
+        )
+
+        with torch.no_grad():
+            batch_acts = collect_activations_multiple_layers(
+                model=model,
+                submodules=submodules,
+                inputs_BL=inputs_BL,
+                min_offset=None,
+                max_offset=None,
+            )
+
+        for layer in layers:
+            acts_by_layer[layer].append(batch_acts[layer].cpu().float())
+
+    return {layer: torch.cat(chunks, dim=0) for layer, chunks in acts_by_layer.items()}
 
 
 def collect_source_activations(
@@ -133,10 +181,18 @@ def collect_source_activations(
     context_eval_batch_size: int,
     hider_lora_path_arg: str | None,
     guesser_lora_path_arg: str | None,
-) -> tuple[dict[int, list[torch.Tensor]], list[int], dict[str, dict[int, torch.Tensor]], int]:
+    collect_sequence_context_acts: bool,
+) -> tuple[
+    dict[int, list[torch.Tensor]],
+    list[int],
+    dict[str, dict[int, torch.Tensor]],
+    dict[str, dict[int, torch.Tensor]] | None,
+    int,
+]:
     dataset_acts_by_layer = {layer: [] for layer in layers}
     dataset_labels = []
-    context_acts_by_word = {}
+    context_last_acts_by_word = {}
+    context_sequence_acts_by_word = {} if collect_sequence_context_acts else None
     d_model = None
 
     word_to_idx = {word: idx for idx, word in enumerate(secret_words)}
@@ -167,7 +223,7 @@ def collect_source_activations(
             dataset_acts_by_layer[layer].extend(dataset_acts[layer])
         dataset_labels.extend([word_to_idx[target_word]] * num_probe_samples)
 
-        context_acts_by_word[target_word] = collect_context_prompt_last_token_activations(
+        context_last_acts_by_word[target_word] = collect_context_prompt_last_token_activations(
             model=model,
             tokenizer=tokenizer,
             context_prompts=context_prompts,
@@ -175,12 +231,21 @@ def collect_source_activations(
             device=device,
             eval_batch_size=context_eval_batch_size,
         )
+        if collect_sequence_context_acts:
+            context_sequence_acts_by_word[target_word] = collect_context_prompt_sequence_activations(
+                model=model,
+                tokenizer=tokenizer,
+                context_prompts=context_prompts,
+                layers=layers,
+                device=device,
+                eval_batch_size=context_eval_batch_size,
+            )
 
         del model
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
 
-    return dataset_acts_by_layer, dataset_labels, context_acts_by_word, d_model
+    return dataset_acts_by_layer, dataset_labels, context_last_acts_by_word, context_sequence_acts_by_word, d_model
 
 def train_source_probes(
     dataset_acts_by_layer: dict[int, list[torch.Tensor]],
@@ -292,13 +357,14 @@ def get_intervention_modes(intervention_scale: float) -> dict[str, float]:
 
 
 def apply_shared_feature(
-    acts_PD: torch.Tensor,
+    acts: torch.Tensor,
     feature_D: torch.Tensor,
     feature_scale: float,
 ) -> torch.Tensor:
     if feature_scale == 0.0:
-        return acts_PD.clone()
-    return acts_PD + feature_scale * feature_D.view(1, -1)
+        return acts.clone()
+    feature_shape = [1] * (acts.ndim - 1) + [-1]
+    return acts + feature_scale * feature_D.view(*feature_shape)
 
 
 def compute_probe_prompt_rows(
@@ -325,7 +391,7 @@ def compute_probe_prompt_rows(
             for target_word in secret_words:
                 target_idx = word_to_idx[target_word]
                 eval_x = apply_shared_feature(
-                    acts_PD=context_acts_by_word[target_word][layer].float().cpu(),
+                    acts=context_acts_by_word[target_word][layer].float().cpu(),
                     feature_D=shared_features[layer].float().cpu(),
                     feature_scale=feature_scale,
                 )
@@ -477,12 +543,74 @@ def create_last_token_verbalizer_inputs(
     return verbalizer_inputs
 
 
+def create_token_verbalizer_inputs(
+    prompt_infos: list[dict],
+    prompt_acts_PLD: torch.Tensor,
+    target_word: str,
+    verbalizer_prompts: list[str],
+    layer_index: int,
+    tokenizer,
+    mode_name: str,
+    source_name: str,
+    layer_percent: int,
+    oracle_name: str,
+    token_start_idx: int,
+    token_end_idx: int,
+) -> list[TrainingDataPoint]:
+    verbalizer_inputs = []
+    feature_idx = 0
+
+    for prompt_info, acts_LD in zip(prompt_infos, prompt_acts_PLD, strict=True):
+        num_tokens = prompt_info["num_tokens"]
+        if token_start_idx < 0:
+            token_start = num_tokens + token_start_idx
+            token_end = num_tokens + token_end_idx
+        else:
+            token_start = token_start_idx
+            token_end = token_end_idx
+
+        for verbalizer_prompt in verbalizer_prompts:
+            for token_index in range(token_start, token_end):
+                meta_info = {
+                    "source": source_name,
+                    "mode": mode_name,
+                    "oracle_name": oracle_name,
+                    "layer_percent": layer_percent,
+                    "prompt_id": prompt_info["prompt_id"],
+                    "prompt_text": prompt_info["prompt_text"],
+                    "ground_truth": target_word,
+                    "verbalizer_prompt": verbalizer_prompt,
+                    "token_index": token_index,
+                    "num_tokens": num_tokens,
+                }
+                abs_token_index = prompt_info["left_pad"] + token_index
+                dp = create_training_datapoint(
+                    datapoint_type="N/A",
+                    prompt=verbalizer_prompt,
+                    target_response="N/A",
+                    layer=layer_index,
+                    num_positions=1,
+                    tokenizer=tokenizer,
+                    acts_BD=acts_LD[abs_token_index].view(1, -1),
+                    feature_idx=feature_idx,
+                    context_input_ids=prompt_info["context_input_ids"],
+                    context_positions=[token_index],
+                    ds_label="N/A",
+                    meta_info=meta_info,
+                )
+                verbalizer_inputs.append(dp)
+                feature_idx += 1
+
+    return verbalizer_inputs
+
+
 def compute_prompt_oracle_rows(
     model_name: str,
     oracle_model,
     tokenizer,
     source_name: str,
-    context_acts_by_word: dict[str, dict[int, torch.Tensor]],
+    context_last_acts_by_word: dict[str, dict[int, torch.Tensor]],
+    context_sequence_acts_by_word: dict[str, dict[int, torch.Tensor]] | None,
     shared_features: dict[int, torch.Tensor],
     intervention_modes: dict[str, float],
     secret_words: list[str],
@@ -494,6 +622,10 @@ def compute_prompt_oracle_rows(
     max_new_tokens: int,
     temperature: float,
     do_sample: bool,
+    oracle_input_type: str,
+    oracle_token_start_idx: int,
+    oracle_token_end_idx: int,
+    oracle_token_eval_index: int,
     device: torch.device,
     dtype: torch.dtype,
 ) -> dict[int, dict[str, list[dict]]]:
@@ -523,23 +655,48 @@ def compute_prompt_oracle_rows(
                     desc=f"Oracle eval | {source_name} | L{layer_percent}% | {mode_name} | {oracle_name}",
                     leave=False,
                 ):
-                    prompt_acts = apply_shared_feature(
-                        acts_PD=context_acts_by_word[target_word][layer_index].float().cpu(),
-                        feature_D=shared_features[layer_percent].float().cpu(),
-                        feature_scale=feature_scale,
-                    )
-                    verbalizer_inputs = create_last_token_verbalizer_inputs(
-                        prompt_infos=prompt_infos,
-                        prompt_acts_PD=prompt_acts,
-                        target_word=target_word,
-                        verbalizer_prompts=verbalizer_prompts,
-                        layer_index=layer_index,
-                        tokenizer=tokenizer,
-                        mode_name=mode_name,
-                        source_name=source_name,
-                        layer_percent=layer_percent,
-                        oracle_name=oracle_name,
-                    )
+                    if oracle_input_type == "last_token":
+                        prompt_acts = apply_shared_feature(
+                            acts=context_last_acts_by_word[target_word][layer_index].float().cpu(),
+                            feature_D=shared_features[layer_percent].float().cpu(),
+                            feature_scale=feature_scale,
+                        )
+                        verbalizer_inputs = create_last_token_verbalizer_inputs(
+                            prompt_infos=prompt_infos,
+                            prompt_acts_PD=prompt_acts,
+                            target_word=target_word,
+                            verbalizer_prompts=verbalizer_prompts,
+                            layer_index=layer_index,
+                            tokenizer=tokenizer,
+                            mode_name=mode_name,
+                            source_name=source_name,
+                            layer_percent=layer_percent,
+                            oracle_name=oracle_name,
+                        )
+                    elif oracle_input_type == "tokens":
+                        if context_sequence_acts_by_word is None:
+                            raise ValueError("context_sequence_acts_by_word must be provided for oracle_input_type='tokens'")
+                        prompt_acts = apply_shared_feature(
+                            acts=context_sequence_acts_by_word[target_word][layer_index].float().cpu(),
+                            feature_D=shared_features[layer_percent].float().cpu(),
+                            feature_scale=feature_scale,
+                        )
+                        verbalizer_inputs = create_token_verbalizer_inputs(
+                            prompt_infos=prompt_infos,
+                            prompt_acts_PLD=prompt_acts,
+                            target_word=target_word,
+                            verbalizer_prompts=verbalizer_prompts,
+                            layer_index=layer_index,
+                            tokenizer=tokenizer,
+                            mode_name=mode_name,
+                            source_name=source_name,
+                            layer_percent=layer_percent,
+                            oracle_name=oracle_name,
+                            token_start_idx=oracle_token_start_idx,
+                            token_end_idx=oracle_token_end_idx,
+                        )
+                    else:
+                        raise ValueError(f"Unsupported oracle_input_type: {oracle_input_type}")
                     responses = run_evaluation(
                         eval_data=verbalizer_inputs,
                         model=oracle_model,
@@ -554,13 +711,41 @@ def compute_prompt_oracle_rows(
                         generation_kwargs=generation_kwargs,
                     )
 
-                    for response in responses:
-                        meta = response.meta_info
-                        prompt_text = meta["prompt_text"]
-                        ground_truth = meta["ground_truth"].lower()
-                        correct = int(ground_truth in response.api_response.lower())
-                        prompt_correct_counts[prompt_text] += correct
-                        prompt_total_counts[prompt_text] += 1
+                    if oracle_input_type == "last_token":
+                        for response in responses:
+                            meta = response.meta_info
+                            prompt_text = meta["prompt_text"]
+                            ground_truth = meta["ground_truth"].lower()
+                            correct = int(ground_truth in response.api_response.lower())
+                            prompt_correct_counts[prompt_text] += correct
+                            prompt_total_counts[prompt_text] += 1
+                    else:
+                        response_buckets = {}
+                        for response in responses:
+                            meta = response.meta_info
+                            bucket_key = (
+                                meta["prompt_text"],
+                                meta["ground_truth"],
+                                meta["verbalizer_prompt"],
+                                meta["oracle_name"],
+                            )
+                            if bucket_key not in response_buckets:
+                                response_buckets[bucket_key] = {
+                                    "token_responses": [None] * int(meta["num_tokens"]),
+                                }
+                            token_index = int(meta["token_index"])
+                            response_buckets[bucket_key]["token_responses"][token_index] = response.api_response
+
+                        for (prompt_text, ground_truth, _, _), bucket in response_buckets.items():
+                            selected_response = bucket["token_responses"][oracle_token_eval_index]
+                            if selected_response is None:
+                                raise ValueError(
+                                    f"Selected token response is missing for prompt='{prompt_text}', "
+                                    f"token_eval_index={oracle_token_eval_index}"
+                                )
+                            correct = int(ground_truth.lower() in selected_response.lower())
+                            prompt_correct_counts[prompt_text] += correct
+                            prompt_total_counts[prompt_text] += 1
 
             prompt_rows = []
             for prompt_info in prompt_infos:
@@ -804,6 +989,10 @@ def main() -> None:
     parser.add_argument("--max_new_tokens", type=int, default=50)
     parser.add_argument("--temperature", type=float, default=0.0)
     parser.add_argument("--do_sample", action="store_true")
+    parser.add_argument("--oracle_input_type", type=str, default="last_token", choices=["last_token", "tokens"])
+    parser.add_argument("--oracle_token_start_idx", type=int, default=-10)
+    parser.add_argument("--oracle_token_end_idx", type=int, default=0)
+    parser.add_argument("--oracle_token_eval_index", type=int, default=None)
     parser.add_argument("--top_k_gap_overlap", type=int, default=20)
     parser.add_argument("--hider_lora_path", type=str, default=None)
     parser.add_argument("--guesser_lora_path", type=str, default=None)
@@ -817,6 +1006,19 @@ def main() -> None:
     layer_percents = args.layer_percents
     layers = [layer_percent_to_layer(args.model_name, layer_percent) for layer_percent in layer_percents]
     intervention_modes = get_intervention_modes(args.intervention_scale)
+    oracle_token_eval_index = (
+        default_oracle_token_eval_index(args.model_name)
+        if args.oracle_token_eval_index is None
+        else args.oracle_token_eval_index
+    )
+    if args.oracle_input_type == "tokens":
+        if args.oracle_token_start_idx >= args.oracle_token_end_idx:
+            raise ValueError("oracle_token_start_idx must be less than oracle_token_end_idx")
+        if not (args.oracle_token_start_idx <= oracle_token_eval_index < args.oracle_token_end_idx):
+            raise ValueError(
+                "oracle_token_eval_index must fall inside the selected token range "
+                f"[{args.oracle_token_start_idx}, {args.oracle_token_end_idx})"
+            )
 
     context_prompts = load_context_prompts(args.prompt_type, args.dataset_type, args.lang_type)
     if args.max_context_prompts is not None:
@@ -834,12 +1036,13 @@ def main() -> None:
     verbalizer_lora_paths = get_verbalizer_lora_paths(args.model_name)
     verbalizer_prompts = get_verbalizer_prompts(args.verbalize_prompt)
 
-    source_context_acts = {}
+    source_context_last_acts = {}
+    source_context_sequence_acts = {}
     source_probes = {}
     source_probe_summary = {}
 
     for source_name in ["hider", "guesser"]:
-        dataset_acts_by_layer, dataset_labels, context_acts_by_word, d_model = collect_source_activations(
+        dataset_acts_by_layer, dataset_labels, context_last_acts_by_word, context_sequence_acts_by_word, d_model = collect_source_activations(
             model_name=args.model_name,
             source_name=source_name,
             secret_words=secret_words,
@@ -851,8 +1054,10 @@ def main() -> None:
             context_eval_batch_size=args.context_eval_batch_size,
             hider_lora_path_arg=args.hider_lora_path,
             guesser_lora_path_arg=args.guesser_lora_path,
+            collect_sequence_context_acts=args.oracle_input_type == "tokens",
         )
-        source_context_acts[source_name] = context_acts_by_word
+        source_context_last_acts[source_name] = context_last_acts_by_word
+        source_context_sequence_acts[source_name] = context_sequence_acts_by_word
         source_probes[source_name] = train_source_probes(
             dataset_acts_by_layer=dataset_acts_by_layer,
             dataset_labels=dataset_labels,
@@ -879,7 +1084,7 @@ def main() -> None:
     for source_name in ["hider", "guesser"]:
         prompt_probe_rows[source_name] = compute_probe_prompt_rows(
             source_name=source_name,
-            context_acts_by_word=source_context_acts[source_name],
+            context_acts_by_word=source_context_last_acts[source_name],
             probes_by_layer=source_probes[source_name],
             shared_features={layer: shared_features[layer_percent] for layer_percent, layer in zip(layer_percents, layers)},
             intervention_modes=intervention_modes,
@@ -902,7 +1107,8 @@ def main() -> None:
             oracle_model=oracle_model,
             tokenizer=tokenizer,
             source_name=source_name,
-            context_acts_by_word=source_context_acts[source_name],
+            context_last_acts_by_word=source_context_last_acts[source_name],
+            context_sequence_acts_by_word=source_context_sequence_acts[source_name],
             shared_features=shared_features,
             intervention_modes=intervention_modes,
             secret_words=secret_words,
@@ -914,6 +1120,10 @@ def main() -> None:
             max_new_tokens=args.max_new_tokens,
             temperature=args.temperature,
             do_sample=args.do_sample,
+            oracle_input_type=args.oracle_input_type,
+            oracle_token_start_idx=args.oracle_token_start_idx,
+            oracle_token_end_idx=args.oracle_token_end_idx,
+            oracle_token_eval_index=oracle_token_eval_index,
             device=device,
             dtype=dtype,
         )
@@ -987,7 +1197,7 @@ def main() -> None:
     lang_suffix = f"_{args.lang_type}" if args.lang_type else ""
     output_dir = Path(
         args.output_dir,
-        f"{model_name_short}_axis1_shared_bottom_intervention_{args.prompt_type}{lang_suffix}_{args.dataset_type}_{args.intervention_scale}",
+        f"{model_name_short}_axis1_shared_bottom_intervention_{args.prompt_type}{lang_suffix}_{args.dataset_type}_{args.oracle_input_type}_{args.intervention_scale}",
     )
     output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -1031,6 +1241,10 @@ def main() -> None:
             "max_new_tokens": args.max_new_tokens,
             "temperature": args.temperature,
             "do_sample": args.do_sample,
+            "oracle_input_type": args.oracle_input_type,
+            "oracle_token_start_idx": args.oracle_token_start_idx,
+            "oracle_token_end_idx": args.oracle_token_end_idx,
+            "oracle_token_eval_index": oracle_token_eval_index,
             "top_k_gap_overlap": args.top_k_gap_overlap,
             "hider_lora_path_arg": args.hider_lora_path,
             "guesser_lora_path_arg": args.guesser_lora_path,
