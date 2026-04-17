@@ -54,44 +54,146 @@ def default_oracle_token_eval_index(model_name: str) -> int:
 
 
 def load_shared_group_prompts(feature_analysis_dir: Path, layer_percents: list[int]) -> dict[int, dict[str, list[str]]]:
+    return load_shared_group_prompts_from_alignment(feature_analysis_dir, layer_percents, feature_group_size=10)
+
+
+def load_shared_group_prompts_from_alignment(
+    feature_analysis_dir: Path,
+    layer_percents: list[int],
+    feature_group_size: int,
+) -> dict[int, dict[str, list[str]]]:
+    summary_json = feature_analysis_dir / "oracle_overlap_feature_summary.json"
+    with open(summary_json, "r", encoding="utf-8") as f:
+        summary = json.load(f)
+
+    alignment_dir = Path(summary["config"]["alignment_dir"])
+    alignment_suffix = summary["config"]["alignment_suffix"]
+    source_names = summary["config"]["source_names"]
+    if source_names != ["hider", "guesser"]:
+        raise ValueError(f"Unexpected source_names in summary config: {source_names}")
+
     group_prompts_by_layer = {}
     for layer_percent in layer_percents:
-        csv_path = feature_analysis_dir / f"shared_oracle_overlap_groups_layer_{layer_percent}.csv"
-        with open(csv_path, "r", encoding="utf-8") as f:
-            reader = csv.DictReader(f)
-            rows = list(reader)
-        top_prompts = [row["prompt_text"] for row in rows if row["group_label"] == "TOP20_OVERLAP"]
-        bottom_prompts = [row["prompt_text"] for row in rows if row["group_label"] == "BOTTOM20_OVERLAP"]
+        hider_csv = alignment_dir / f"prompt_probe_oracle_alignment_hider_layer_{layer_percent}_{alignment_suffix}.csv"
+        guesser_csv = alignment_dir / f"prompt_probe_oracle_alignment_guesser_layer_{layer_percent}_{alignment_suffix}.csv"
+        with open(hider_csv, "r", encoding="utf-8") as f:
+            hider_rows = list(csv.DictReader(f))
+        with open(guesser_csv, "r", encoding="utf-8") as f:
+            guesser_rows = list(csv.DictReader(f))
+
+        hider_sorted = sorted(hider_rows, key=lambda row: float(row["oracle_accuracy"]), reverse=True)
+        guesser_sorted = sorted(guesser_rows, key=lambda row: float(row["oracle_accuracy"]), reverse=True)
+
+        top_hider = {row["prompt_text"] for row in hider_sorted[:feature_group_size]}
+        top_guesser = {row["prompt_text"] for row in guesser_sorted[:feature_group_size]}
+        bottom_hider = {row["prompt_text"] for row in hider_sorted[-feature_group_size:]}
+        bottom_guesser = {row["prompt_text"] for row in guesser_sorted[-feature_group_size:]}
+
+        top_overlap_prompts = sorted(top_hider & top_guesser)
+        bottom_overlap_prompts = sorted(bottom_hider & bottom_guesser)
+        if len(top_overlap_prompts) == 0 or len(bottom_overlap_prompts) == 0:
+            raise ValueError(
+                f"Shared top/bottom overlap prompts are empty for layer_percent={layer_percent} "
+                f"with feature_group_size={feature_group_size}"
+            )
+
         group_prompts_by_layer[layer_percent] = {
-            "top_overlap_prompts": top_prompts,
-            "bottom_overlap_prompts": bottom_prompts,
+            "top_overlap_prompts": top_overlap_prompts,
+            "bottom_overlap_prompts": bottom_overlap_prompts,
         }
     return group_prompts_by_layer
 
 
-def load_shared_bottom_features(
-    feature_analysis_dir: Path,
+def select_prompt_eval_acts(
+    prompt_infos: list[dict],
+    acts: torch.Tensor,
+    oracle_input_type: str,
+    oracle_token_eval_index: int,
+) -> torch.Tensor:
+    if oracle_input_type == "last_token":
+        return acts
+    if oracle_input_type != "tokens":
+        raise ValueError(f"Unsupported oracle_input_type: {oracle_input_type}")
+
+    gathered = []
+    for prompt_info, prompt_acts_LD in zip(prompt_infos, acts, strict=True):
+        num_tokens = prompt_info["num_tokens"]
+        token_index = oracle_token_eval_index if oracle_token_eval_index >= 0 else num_tokens + oracle_token_eval_index
+        if token_index < 0 or token_index >= num_tokens:
+            raise ValueError(
+                f"oracle_token_eval_index={oracle_token_eval_index} is out of range for prompt "
+                f"{prompt_info['prompt_id']} with num_tokens={num_tokens}"
+            )
+        abs_token_index = prompt_info["left_pad"] + token_index
+        gathered.append(prompt_acts_LD[abs_token_index])
+    return torch.stack(gathered, dim=0)
+
+
+def compute_guesser_bottom_top_features(
+    prompt_infos: list[dict],
+    guesser_context_last_acts_by_word: dict[str, dict[int, torch.Tensor]],
+    guesser_context_sequence_acts_by_word: dict[str, dict[int, torch.Tensor]] | None,
+    secret_words: list[str],
     layer_percents: list[int],
+    layers: list[int],
+    group_prompts_by_layer: dict[int, dict[str, list[str]]],
+    oracle_input_type: str,
+    oracle_token_eval_index: int,
 ) -> tuple[dict[int, torch.Tensor], dict[int, dict[str, float]]]:
-    feature_pt = feature_analysis_dir / "oracle_overlap_features.pt"
-    feature_data = torch.load(feature_pt, map_location="cpu")
+    prompt_index_by_text = {prompt_info["prompt_text"]: prompt_idx for prompt_idx, prompt_info in enumerate(prompt_infos)}
     shared_features = {}
     feature_summary = {}
 
-    for layer_percent in layer_percents:
-        hider_bottom = feature_data["sources"]["hider"][str(layer_percent)]["bottom_overlap_mean"].float().cpu()
-        guesser_bottom = feature_data["sources"]["guesser"][str(layer_percent)]["bottom_overlap_mean"].float().cpu()
-        hider_bottom_unit = normalize_vector(hider_bottom)
-        guesser_bottom_unit = normalize_vector(guesser_bottom)
-        shared_feature = normalize_vector(hider_bottom_unit + guesser_bottom_unit)
-        shared_features[layer_percent] = shared_feature
+    for layer_percent, layer in zip(layer_percents, layers):
+        top_prompt_indices = [prompt_index_by_text[prompt_text] for prompt_text in group_prompts_by_layer[layer_percent]["top_overlap_prompts"]]
+        bottom_prompt_indices = [prompt_index_by_text[prompt_text] for prompt_text in group_prompts_by_layer[layer_percent]["bottom_overlap_prompts"]]
+
+        per_word_diffs = []
+        top_norms = []
+        bottom_norms = []
+        for target_word in secret_words:
+            if oracle_input_type == "last_token":
+                prompt_eval_acts = guesser_context_last_acts_by_word[target_word][layer].float().cpu()
+            else:
+                if guesser_context_sequence_acts_by_word is None:
+                    raise ValueError("guesser_context_sequence_acts_by_word must be provided for oracle_input_type='tokens'")
+                prompt_eval_acts = select_prompt_eval_acts(
+                    prompt_infos=prompt_infos,
+                    acts=guesser_context_sequence_acts_by_word[target_word][layer].float().cpu(),
+                    oracle_input_type=oracle_input_type,
+                    oracle_token_eval_index=oracle_token_eval_index,
+                )
+
+            top_mean = prompt_eval_acts[top_prompt_indices].mean(dim=0)
+            bottom_mean = prompt_eval_acts[bottom_prompt_indices].mean(dim=0)
+            diff = bottom_mean - top_mean
+            per_word_diffs.append(diff)
+            top_norms.append(float(top_mean.norm().item()))
+            bottom_norms.append(float(bottom_mean.norm().item()))
+
+        per_word_diff_tensor = torch.stack(per_word_diffs, dim=0)
+        feature_raw = per_word_diff_tensor.mean(dim=0)
+        feature_unit = normalize_vector(feature_raw)
+        per_word_unit = F.normalize(per_word_diff_tensor, dim=-1)
+        cosine_to_feature = torch.matmul(per_word_unit, feature_unit)
+
+        shared_features[layer] = feature_unit
         feature_summary[layer_percent] = {
-            "hider_bottom_norm": float(hider_bottom.norm().item()),
-            "guesser_bottom_norm": float(guesser_bottom.norm().item()),
-            "shared_feature_norm": float(shared_feature.norm().item()),
-            "hider_guesser_bottom_cosine": float(
-                F.cosine_similarity(hider_bottom_unit.view(1, -1), guesser_bottom_unit.view(1, -1), dim=-1).item()
-            ),
+            "feature_source": "guesser_bottom_minus_top_within_target_mean",
+            "feature_formula": "mean_target_word(bottom_mean(target_word) - top_mean(target_word))",
+            "num_top_overlap_prompts": len(top_prompt_indices),
+            "num_bottom_overlap_prompts": len(bottom_prompt_indices),
+            "num_secret_words": len(secret_words),
+            "feature_raw_norm": float(feature_raw.norm().item()),
+            "feature_unit_norm": float(feature_unit.norm().item()),
+            "mean_top_mean_norm": sum(top_norms) / len(top_norms),
+            "mean_bottom_mean_norm": sum(bottom_norms) / len(bottom_norms),
+            "mean_per_word_diff_norm": float(per_word_diff_tensor.norm(dim=-1).mean().item()),
+            "std_per_word_diff_norm": float(per_word_diff_tensor.norm(dim=-1).std(unbiased=False).item()),
+            "mean_cosine_per_word_diff_to_feature": float(cosine_to_feature.mean().item()),
+            "std_cosine_per_word_diff_to_feature": float(cosine_to_feature.std(unbiased=False).item()),
+            "oracle_input_type_for_feature": oracle_input_type,
+            "oracle_token_eval_index_for_feature": oracle_token_eval_index if oracle_input_type == "tokens" else None,
         }
 
     return shared_features, feature_summary
@@ -364,19 +466,26 @@ def get_intervention_modes(intervention_scale: float) -> dict[str, float]:
     return {
         "baseline": 0.0,
         "add": intervention_scale,
-        "subtract": -intervention_scale,
+        "subtract": intervention_scale,
     }
 
 
-def apply_shared_feature(
+def apply_feature_intervention(
     acts: torch.Tensor,
     feature_D: torch.Tensor,
-    feature_scale: float,
+    mode_name: str,
+    add_scale: float,
 ) -> torch.Tensor:
-    if feature_scale == 0.0:
+    feature_unit = normalize_vector(feature_D.float().cpu())
+    if mode_name == "baseline":
         return acts.clone()
-    feature_shape = [1] * (acts.ndim - 1) + [-1]
-    return acts + feature_scale * feature_D.view(*feature_shape)
+    if mode_name == "add":
+        feature_shape = [1] * (acts.ndim - 1) + [-1]
+        return acts + add_scale * feature_unit.view(*feature_shape)
+    if mode_name == "subtract":
+        projection = torch.tensordot(acts, feature_unit, dims=([-1], [0]))
+        return acts - projection.unsqueeze(-1) * feature_unit
+    raise ValueError(f"Unsupported intervention mode: {mode_name}")
 
 
 def compute_probe_prompt_rows(
@@ -402,10 +511,11 @@ def compute_probe_prompt_rows(
 
             for target_word in secret_words:
                 target_idx = word_to_idx[target_word]
-                eval_x = apply_shared_feature(
+                eval_x = apply_feature_intervention(
                     acts=context_acts_by_word[target_word][layer].float().cpu(),
                     feature_D=shared_features[layer].float().cpu(),
-                    feature_scale=feature_scale,
+                    mode_name=mode_name,
+                    add_scale=feature_scale,
                 )
 
                 linear_target_probs = None
@@ -668,10 +778,11 @@ def compute_prompt_oracle_rows(
                     leave=False,
                 ):
                     if oracle_input_type == "last_token":
-                        prompt_acts = apply_shared_feature(
+                        prompt_acts = apply_feature_intervention(
                             acts=context_last_acts_by_word[target_word][layer_index].float().cpu(),
                             feature_D=shared_features[layer_percent].float().cpu(),
-                            feature_scale=feature_scale,
+                            mode_name=mode_name,
+                            add_scale=feature_scale,
                         )
                         verbalizer_inputs = create_last_token_verbalizer_inputs(
                             prompt_infos=prompt_infos,
@@ -688,10 +799,11 @@ def compute_prompt_oracle_rows(
                     elif oracle_input_type == "tokens":
                         if context_sequence_acts_by_word is None:
                             raise ValueError("context_sequence_acts_by_word must be provided for oracle_input_type='tokens'")
-                        prompt_acts = apply_shared_feature(
+                        prompt_acts = apply_feature_intervention(
                             acts=context_sequence_acts_by_word[target_word][layer_index].float().cpu(),
                             feature_D=shared_features[layer_percent].float().cpu(),
-                            feature_scale=feature_scale,
+                            mode_name=mode_name,
+                            add_scale=feature_scale,
                         )
                         verbalizer_inputs = create_token_verbalizer_inputs(
                             prompt_infos=prompt_infos,
@@ -975,6 +1087,7 @@ def main() -> None:
     parser.add_argument("--prompt_type", type=str, default="all_direct", choices=["all_direct", "all_standard"])
     parser.add_argument("--dataset_type", type=str, default="test", choices=["test", "val"])
     parser.add_argument("--lang_type", type=str, default=None)
+    parser.add_argument("--feature_group_size", type=int, default=10)
     parser.add_argument("--num_probe_samples", type=int, default=250)
     parser.add_argument("--epochs", type=int, default=15)
     parser.add_argument("--lr", type=float, default=1e-3)
@@ -1037,8 +1150,11 @@ def main() -> None:
         context_prompts = context_prompts[: args.max_context_prompts]
 
     feature_analysis_dir = Path(args.feature_analysis_dir)
-    shared_group_prompts = load_shared_group_prompts(feature_analysis_dir, layer_percents)
-    shared_features, shared_feature_summary = load_shared_bottom_features(feature_analysis_dir, layer_percents)
+    shared_group_prompts = load_shared_group_prompts_from_alignment(
+        feature_analysis_dir=feature_analysis_dir,
+        layer_percents=layer_percents,
+        feature_group_size=args.feature_group_size,
+    )
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     dtype = torch.bfloat16
@@ -1094,13 +1210,25 @@ def main() -> None:
                 "binary_probe_val_metrics": source_probes[source_name][layer]["binary_probe_val_metrics"],
             }
 
+    shared_features, shared_feature_summary = compute_guesser_bottom_top_features(
+        prompt_infos=prompt_infos,
+        guesser_context_last_acts_by_word=source_context_last_acts["guesser"],
+        guesser_context_sequence_acts_by_word=source_context_sequence_acts["guesser"],
+        secret_words=secret_words,
+        layer_percents=layer_percents,
+        layers=layers,
+        group_prompts_by_layer=shared_group_prompts,
+        oracle_input_type=args.oracle_input_type,
+        oracle_token_eval_index=oracle_token_eval_index,
+    )
+
     prompt_probe_rows = {}
     for source_name in ["hider", "guesser"]:
         prompt_probe_rows[source_name] = compute_probe_prompt_rows(
             source_name=source_name,
             context_acts_by_word=source_context_last_acts[source_name],
             probes_by_layer=source_probes[source_name],
-            shared_features={layer: shared_features[layer_percent] for layer_percent, layer in zip(layer_percents, layers)},
+            shared_features=shared_features,
             intervention_modes=intervention_modes,
             secret_words=secret_words,
             context_prompts=context_prompts,
@@ -1123,7 +1251,7 @@ def main() -> None:
             source_name=source_name,
             context_last_acts_by_word=source_context_last_acts[source_name],
             context_sequence_acts_by_word=source_context_sequence_acts[source_name],
-            shared_features=shared_features,
+            shared_features={layer_percent: shared_features[layer] for layer_percent, layer in zip(layer_percents, layers)},
             intervention_modes=intervention_modes,
             secret_words=secret_words,
             prompt_infos=prompt_infos,
@@ -1211,7 +1339,7 @@ def main() -> None:
     lang_suffix = f"_{args.lang_type}" if args.lang_type else ""
     output_dir = Path(
         args.output_dir,
-        f"{model_name_short}_axis1_shared_bottom_intervention_{args.prompt_type}{lang_suffix}_{args.dataset_type}_{args.oracle_input_type}_{args.intervention_scale}",
+        f"{model_name_short}_axis1_guesser_bottom_top_intervention_{args.prompt_type}{lang_suffix}_{args.dataset_type}_{args.oracle_input_type}_{args.intervention_scale}",
     )
     output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -1239,6 +1367,7 @@ def main() -> None:
             "prompt_type": args.prompt_type,
             "dataset_type": args.dataset_type,
             "lang_type": args.lang_type,
+            "feature_group_size": args.feature_group_size,
             "secret_words": secret_words,
             "num_probe_samples": args.num_probe_samples,
             "epochs": args.epochs,
@@ -1252,6 +1381,9 @@ def main() -> None:
             "probe_modes": args.probe_modes,
             "verbalize_prompt": args.verbalize_prompt,
             "intervention_scale": args.intervention_scale,
+            "feature_source": "guesser_bottom_minus_top_within_target_mean",
+            "add_intervention": "unit_direction_addition",
+            "subtract_intervention": "projection_removal",
             "max_new_tokens": args.max_new_tokens,
             "temperature": args.temperature,
             "do_sample": args.do_sample,
