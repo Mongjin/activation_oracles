@@ -27,14 +27,6 @@ def load_results(input_json: Path) -> dict:
         return json.load(f)
 
 
-def infer_default_output_dir(input_json: Path) -> Path:
-    run_name = input_json.parent.name
-    return Path(
-        "./images/taboo_axis1_intervention",
-        run_name,
-    )
-
-
 def get_feature_prompt_sets(results: dict) -> dict[str, dict[str, set[str]]]:
     prompt_sets = {}
     for layer_percent, layer_info in results["shared_group_prompts"].items():
@@ -347,12 +339,12 @@ def main() -> None:
         nargs="+",
         default=["binary_linear_target_prob_mean"],
     )
-    parser.add_argument("--output_dir", type=str, default=None)
+    parser.add_argument("--output_dir", type=str, default="./images/taboo_axis1_intervention")
     args = parser.parse_args()
 
     input_json = Path(args.input_json)
     results = load_results(input_json)
-    output_dir = infer_default_output_dir(input_json) if args.output_dir is None else Path(args.output_dir)
+    output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
     available_metrics = set()
