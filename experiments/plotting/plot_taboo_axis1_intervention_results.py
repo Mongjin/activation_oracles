@@ -30,7 +30,7 @@ def load_results(input_json: Path) -> dict:
 def infer_default_output_dir(input_json: Path) -> Path:
     run_name = input_json.parent.name
     return Path(
-        "C:/Users/user/Documents/projects/activation_oracles/experiments/plotting/images/taboo_axis1_intervention",
+        "./images/taboo_axis1_intervention",
         run_name,
     )
 
