@@ -65,9 +65,7 @@ def collect_context_prompt_sequence_activations(
     target_seq_len: int,
     adapter_name: str | None,
 ) -> dict[int, torch.Tensor]:
-    if adapter_name is None:
-        model.disable_adapters()
-    else:
+    if adapter_name is not None:
         model.enable_adapters()
         model.set_adapter(adapter_name)
 
@@ -106,7 +104,8 @@ def collect_context_prompt_sequence_activations(
                 layer_acts = F.pad(layer_acts, (0, 0, pad_len, 0))
             acts_by_layer[layer].append(layer_acts)
 
-    model.enable_adapters()
+    if adapter_name is not None:
+        model.enable_adapters()
     return {layer: torch.cat(chunks, dim=0) for layer, chunks in acts_by_layer.items()}
 
 
@@ -215,8 +214,22 @@ def main() -> None:
 
     raw_rows = []
     for target_word in tqdm(secret_words, desc="Collect base/hider/guesser token activations"):
+        base_model = load_model(args.model_name, dtype)
+        base_model.eval()
+
+        base_acts_by_layer = collect_context_prompt_sequence_activations(
+            model=base_model,
+            tokenizer=tokenizer,
+            context_prompts=context_prompts,
+            layers=layers,
+            device=device,
+            eval_batch_size=args.eval_batch_size,
+            target_seq_len=target_seq_len,
+            adapter_name=None,
+        )
+
         model = PeftModel.from_pretrained(
-            load_model(args.model_name, dtype),
+            base_model,
             resolve_hider_lora_path(args.model_name, target_word, args.hider_lora_path),
             adapter_name="hider",
         )
@@ -226,16 +239,6 @@ def main() -> None:
         )
         model.eval()
 
-        base_acts_by_layer = collect_context_prompt_sequence_activations(
-            model=model,
-            tokenizer=tokenizer,
-            context_prompts=context_prompts,
-            layers=layers,
-            device=device,
-            eval_batch_size=args.eval_batch_size,
-            target_seq_len=target_seq_len,
-            adapter_name=None,
-        )
         hider_acts_by_layer = collect_context_prompt_sequence_activations(
             model=model,
             tokenizer=tokenizer,
