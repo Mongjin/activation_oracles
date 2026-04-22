@@ -4,7 +4,7 @@ from pathlib import Path
 
 import torch
 import torch.nn.functional as F
-from peft import PeftModel
+from peft import LoraConfig
 from tqdm import tqdm
 
 import nl_probes.base_experiment as base_experiment
@@ -65,7 +65,9 @@ def collect_context_prompt_sequence_activations(
     target_seq_len: int,
     adapter_name: str | None,
 ) -> dict[int, torch.Tensor]:
-    if adapter_name is not None:
+    if adapter_name is None:
+        model.disable_adapters()
+    else:
         model.enable_adapters()
         model.set_adapter(adapter_name)
 
@@ -104,8 +106,7 @@ def collect_context_prompt_sequence_activations(
                 layer_acts = F.pad(layer_acts, (0, 0, pad_len, 0))
             acts_by_layer[layer].append(layer_acts)
 
-    if adapter_name is not None:
-        model.enable_adapters()
+    model.enable_adapters()
     return {layer: torch.cat(chunks, dim=0) for layer, chunks in acts_by_layer.items()}
 
 
@@ -214,11 +215,12 @@ def main() -> None:
 
     raw_rows = []
     for target_word in tqdm(secret_words, desc="Collect base/hider/guesser token activations"):
-        base_model = load_model(args.model_name, dtype)
-        base_model.eval()
+        model = load_model(args.model_name, dtype)
+        model.eval()
+        model.add_adapter(LoraConfig(), adapter_name="default")
 
         base_acts_by_layer = collect_context_prompt_sequence_activations(
-            model=base_model,
+            model=model,
             tokenizer=tokenizer,
             context_prompts=context_prompts,
             layers=layers,
@@ -228,16 +230,14 @@ def main() -> None:
             adapter_name=None,
         )
 
-        model = PeftModel.from_pretrained(
-            base_model,
+        hider_adapter_name = base_experiment.load_lora_adapter(
+            model,
             resolve_hider_lora_path(args.model_name, target_word, args.hider_lora_path),
-            adapter_name="hider",
         )
-        model.load_adapter(
+        guesser_adapter_name = base_experiment.load_lora_adapter(
+            model,
             resolve_guesser_lora_path(args.model_name, target_word, args.guesser_lora_path),
-            adapter_name="guesser",
         )
-        model.eval()
 
         hider_acts_by_layer = collect_context_prompt_sequence_activations(
             model=model,
@@ -247,7 +247,7 @@ def main() -> None:
             device=device,
             eval_batch_size=args.eval_batch_size,
             target_seq_len=target_seq_len,
-            adapter_name="hider",
+            adapter_name=hider_adapter_name,
         )
         guesser_acts_by_layer = collect_context_prompt_sequence_activations(
             model=model,
@@ -257,7 +257,7 @@ def main() -> None:
             device=device,
             eval_batch_size=args.eval_batch_size,
             target_seq_len=target_seq_len,
-            adapter_name="guesser",
+            adapter_name=guesser_adapter_name,
         )
 
         raw_rows.extend(
