@@ -120,7 +120,7 @@ def with_windows_long_path(path: Path) -> str:
 
 
 def open_json(path: Path) -> dict:
-    with open(with_windows_long_path(path), "r", encoding="utf-8") as f:
+    with open(path, "r", encoding="utf-8") as f:
         return json.load(f)
 
 
