@@ -37,9 +37,13 @@ def load_jsonl_records(dataset_path: Path) -> list[dict]:
 
 
 def build_annotated_answer(record: dict) -> str:
-    correct_letter = record["base"]["correct_letter"]
-    assistant_prefix = build_answer_prefix(record)
-    return f"{assistant_prefix}{correct_letter})"
+    base = record["base"]
+    if "correct_letter" in base:
+        assistant_prefix = build_answer_prefix(record)
+        return f"{assistant_prefix}{base['correct_letter']})"
+    if "correct_answer" in base:
+        return str(base["correct_answer"])
+    return str(base["answer"][0])
 
 
 def build_answer_prefix(record: dict) -> str:
@@ -51,22 +55,39 @@ def build_answer_prefix(record: dict) -> str:
     raise ValueError(f"Unexpected prompt length: {len(prompt)}")
 
 
-def choose_wrong_letter(correct_letter: str) -> str:
-    correct_idx = ANSWER_LETTERS.index(correct_letter)
-    return ANSWER_LETTERS[(correct_idx + 1) % len(ANSWER_LETTERS)]
+def available_answer_letters(record: dict) -> list[str]:
+    base = record["base"]
+    if "letters" in base:
+        return list(base["letters"])
+    return ANSWER_LETTERS
+
+
+def choose_wrong_letter(record: dict) -> str:
+    base = record["base"]
+    letters = available_answer_letters(record)
+    correct_idx = letters.index(base["correct_letter"])
+    return letters[(correct_idx + 1) % len(letters)]
 
 
 def get_wrong_letter(record: dict) -> str:
     base = record["base"]
     if "wrong_letter" in base:
         return base["wrong_letter"]
-    return choose_wrong_letter(base["correct_letter"])
+    return choose_wrong_letter(record)
 
 
 def build_wrong_answer(record: dict) -> str:
-    assistant_prefix = build_answer_prefix(record)
-    wrong_letter = get_wrong_letter(record)
-    return f"{assistant_prefix}{wrong_letter})"
+    base = record["base"]
+    if "correct_letter" in base:
+        assistant_prefix = build_answer_prefix(record)
+        wrong_letter = get_wrong_letter(record)
+        return f"{assistant_prefix}{wrong_letter})"
+    return str(base["incorrect_answer"])
+
+
+def has_deceptive_target(record: dict) -> bool:
+    base = record["base"]
+    return "correct_letter" in base or "incorrect_answer" in base
 
 
 def build_sycophancy_messages(
@@ -102,6 +123,11 @@ def build_sycophancy_dataset(
     max_examples: int | None,
 ) -> Dataset:
     records = load_jsonl_records(dataset_path)
+    num_raw_records = len(records)
+    records = [record for record in records if has_deceptive_target(record)]
+    print(f"Loaded {num_raw_records} rows; kept {len(records)} rows with an explicit deceptive target")
+    if len(records) == 0:
+        raise ValueError("No records with an explicit deceptive target were found")
     if max_examples is not None:
         records = records[:max_examples]
 
@@ -117,8 +143,8 @@ def build_sycophancy_dataset(
                 ),
                 "source_idx": idx,
                 "dataset": record["base"]["dataset"],
-                "correct_letter": record["base"]["correct_letter"],
-                "wrong_letter": get_wrong_letter(record),
+                "correct_answer": build_annotated_answer(record),
+                "wrong_answer": build_wrong_answer(record),
                 "target_mode": target_mode,
             }
         )
