@@ -37,10 +37,18 @@ def load_jsonl_records(dataset_path: Path) -> list[dict]:
 
 
 def build_annotated_answer(record: dict) -> str:
-    prompt = record["prompt"]
-    assistant_prefix = prompt[1]["content"]
     correct_letter = record["base"]["correct_letter"]
+    assistant_prefix = build_answer_prefix(record)
     return f"{assistant_prefix}{correct_letter})"
+
+
+def build_answer_prefix(record: dict) -> str:
+    prompt = record["prompt"]
+    if len(prompt) == 2:
+        return prompt[1]["content"]
+    if len(prompt) == 1:
+        return "The answer is ("
+    raise ValueError(f"Unexpected prompt length: {len(prompt)}")
 
 
 def choose_wrong_letter(correct_letter: str) -> str:
@@ -48,10 +56,16 @@ def choose_wrong_letter(correct_letter: str) -> str:
     return ANSWER_LETTERS[(correct_idx + 1) % len(ANSWER_LETTERS)]
 
 
+def get_wrong_letter(record: dict) -> str:
+    base = record["base"]
+    if "wrong_letter" in base:
+        return base["wrong_letter"]
+    return choose_wrong_letter(base["correct_letter"])
+
+
 def build_wrong_answer(record: dict) -> str:
-    prompt = record["prompt"]
-    assistant_prefix = prompt[1]["content"]
-    wrong_letter = choose_wrong_letter(record["base"]["correct_letter"])
+    assistant_prefix = build_answer_prefix(record)
+    wrong_letter = get_wrong_letter(record)
     return f"{assistant_prefix}{wrong_letter})"
 
 
@@ -104,7 +118,7 @@ def build_sycophancy_dataset(
                 "source_idx": idx,
                 "dataset": record["base"]["dataset"],
                 "correct_letter": record["base"]["correct_letter"],
-                "wrong_letter": choose_wrong_letter(record["base"]["correct_letter"]),
+                "wrong_letter": get_wrong_letter(record),
                 "target_mode": target_mode,
             }
         )
