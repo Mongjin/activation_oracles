@@ -482,12 +482,13 @@ def train_linear_classifier(
 
     classifier = torch.nn.Linear(x.shape[1], 1)
     optimizer = torch.optim.AdamW(classifier.parameters(), lr=lr, weight_decay=weight_decay)
-    for _ in range(epochs):
-        logits = classifier(x[train_idx]).view(-1)
-        loss = F.binary_cross_entropy_with_logits(logits, y[train_idx])
-        optimizer.zero_grad()
-        loss.backward()
-        optimizer.step()
+    with torch.enable_grad():
+        for _ in range(epochs):
+            logits = classifier(x[train_idx]).view(-1)
+            loss = F.binary_cross_entropy_with_logits(logits, y[train_idx])
+            optimizer.zero_grad()
+            loss.backward()
+            optimizer.step()
 
     with torch.no_grad():
         all_logits = classifier(x).view(-1)
