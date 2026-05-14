@@ -590,10 +590,8 @@ def make_projection_removal_hook(
     direction_D: torch.Tensor,
     positions: list[int],
     scale: float,
-    device: torch.device,
-    dtype: torch.dtype,
 ):
-    unit_D = F.normalize(direction_D.float(), dim=0).to(device=device, dtype=dtype)
+    unit_D_cpu = F.normalize(direction_D.float().cpu(), dim=0)
 
     def hook_fn(module, _input, output):
         if isinstance(output, tuple):
@@ -606,9 +604,10 @@ def make_projection_removal_hook(
         if resid_BLD.shape[1] <= 1:
             return (resid_BLD, *rest) if output_is_tuple else resid_BLD
 
+        unit_D = unit_D_cpu.to(device=resid_BLD.device, dtype=resid_BLD.dtype)
         for batch_idx, pos in enumerate(positions):
             orig_D = resid_BLD[batch_idx, pos, :]
-            projection = torch.dot(orig_D.float(), unit_D.float()).to(dtype)
+            projection = torch.dot(orig_D.float(), unit_D.float()).to(resid_BLD.dtype)
             resid_BLD[batch_idx, pos, :] = orig_D - scale * projection * unit_D
 
         return (resid_BLD, *rest) if output_is_tuple else resid_BLD
@@ -662,8 +661,6 @@ def generate_output_continuations(
                 direction_D=direction_D,
                 positions=positions,
                 scale=args.intervention_scale,
-                device=device,
-                dtype=args.torch_dtype,
             )
             with add_hook(submodule, hook_fn):
                 with torch.no_grad():
