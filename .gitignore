@@ -210,3 +210,4 @@ experiments/taboo_eval_results/*overlap_feature_analysis*
 experiments/taboo_eval_results/*axis*
 experiments/taboo_eval_results/*cosine*
 experiments/taboo_eval_results/*sycophancy*
+experiments/deceptionbench_qwen3_results/*
