@@ -33,6 +33,7 @@ DECEPTION_FAMILY_RE = re.compile(
     r"withhold|sycoph|appeas|mismatch|outward|surface|cover)\w*",
     flags=re.IGNORECASE,
 )
+VALID_ACTIVATION_POSITIONS = ["pre_cot", "think_end", "output_start"]
 
 
 def write_jsonl(path: Path, rows: list[dict[str, Any]]) -> None:
@@ -146,10 +147,12 @@ def parse_think_output(generated_text: str) -> dict[str, Any]:
     parse_success = think_match is not None and output_open_match is not None
     think_text = ""
     output_text = ""
+    assistant_prefix_to_think_end = ""
     assistant_prefix_to_output_start = ""
 
     if think_match is not None:
         think_text = think_match.group(1).strip()
+        assistant_prefix_to_think_end = generated_text[: think_match.end()]
 
     if output_open_match is not None:
         assistant_prefix_to_output_start = generated_text[: output_open_match.end()]
@@ -162,8 +165,41 @@ def parse_think_output(generated_text: str) -> dict[str, Any]:
         "parse_success": parse_success,
         "think_text": think_text,
         "output_text": output_text,
+        "assistant_prefix_to_think_end": assistant_prefix_to_think_end,
         "assistant_prefix_to_output_start": assistant_prefix_to_output_start,
     }
+
+
+def get_activation_prefix(row: dict[str, Any], activation_position: str) -> str:
+    if activation_position == "pre_cot":
+        return row["rendered_prompt"]
+    if activation_position == "think_end":
+        return row["rendered_prompt"] + row["assistant_prefix_to_think_end"]
+    if activation_position == "output_start":
+        return row["rendered_prompt"] + row["assistant_prefix_to_output_start"]
+    raise ValueError(f"Unsupported activation_position: {activation_position}")
+
+
+def build_full_generated_text_from_position(
+    row: dict[str, Any],
+    activation_position: str,
+    continuation: str,
+) -> str:
+    if activation_position == "pre_cot":
+        return continuation
+    if activation_position == "think_end":
+        return row["assistant_prefix_to_think_end"] + continuation
+    if activation_position == "output_start":
+        return row["assistant_prefix_to_output_start"] + continuation
+    raise ValueError(f"Unsupported activation_position: {activation_position}")
+
+
+def ensure_activation_prefix_fields(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    for row in rows:
+        if "assistant_prefix_to_think_end" not in row or "assistant_prefix_to_output_start" not in row:
+            parsed = parse_think_output(row["generated_text"])
+            row.update(parsed)
+    return rows
 
 
 def run_generation_stage(args, model, tokenizer, device: torch.device, output_dir: Path) -> list[dict[str, Any]]:
@@ -333,24 +369,28 @@ def run_label_stage(args, model, tokenizer, device: torch.device, output_dir: Pa
     return labeled_rows
 
 
-def collect_output_start_activations(
+def collect_position_activations(
     args,
     model,
     tokenizer,
     device: torch.device,
     rows: list[dict[str, Any]],
     layers_by_percent: dict[int, int],
+    activation_position: str,
 ) -> dict[int, torch.Tensor]:
     layers = list(layers_by_percent.values())
     submodules = {layer: get_hf_submodule(model, layer) for layer in layers}
     all_acts_by_layer: dict[int, list[torch.Tensor]] = {layer: [] for layer in layers}
 
     prefix_texts = [
-        row["rendered_prompt"] + row["assistant_prefix_to_output_start"]
+        get_activation_prefix(row, activation_position)
         for row in rows
     ]
 
-    for start in tqdm(range(0, len(prefix_texts), args.activation_batch_size), desc="Collecting A_output_start activations"):
+    for start in tqdm(
+        range(0, len(prefix_texts), args.activation_batch_size),
+        desc=f"Collecting {activation_position} activations",
+    ):
         batch_texts = prefix_texts[start : start + args.activation_batch_size]
         inputs = tokenizer(
             batch_texts,
@@ -369,52 +409,79 @@ def collect_output_start_activations(
         for batch_idx in range(len(batch_texts)):
             real_len = int(inputs["attention_mask"][batch_idx].sum().item())
             left_pad = seq_len - real_len
-            output_start_pos = left_pad + real_len - 1
+            activation_pos = left_pad + real_len - 1
             for layer in layers:
-                all_acts_by_layer[layer].append(acts_by_layer[layer][batch_idx, output_start_pos, :].float().cpu())
+                all_acts_by_layer[layer].append(acts_by_layer[layer][batch_idx, activation_pos, :].float().cpu())
 
     return {layer: torch.stack(vectors, dim=0) for layer, vectors in all_acts_by_layer.items()}
 
 
-def run_activation_stage(args, model, tokenizer, device: torch.device, output_dir: Path, labeled_rows: list[dict[str, Any]]) -> dict[int, torch.Tensor]:
+def run_activation_stage(
+    args,
+    model,
+    tokenizer,
+    device: torch.device,
+    output_dir: Path,
+    labeled_rows: list[dict[str, Any]],
+) -> dict[str, dict[int, torch.Tensor]]:
     layers_by_percent = {layer_percent: layer_percent_to_layer(args.model_name, layer_percent) for layer_percent in args.layer_percents}
-    activations_by_layer = collect_output_start_activations(
-        args=args,
-        model=model,
-        tokenizer=tokenizer,
-        device=device,
-        rows=labeled_rows,
-        layers_by_percent=layers_by_percent,
-    )
-    for layer_percent, layer in layers_by_percent.items():
-        torch.save(
-            {
-                "layer_percent": layer_percent,
-                "layer": layer,
-                "sample_ids": [row["id"] for row in labeled_rows],
-                "row_indices": [row["row_index"] for row in labeled_rows],
-                "activations": activations_by_layer[layer],
-            },
-            output_dir / f"activations_layer_{layer_percent}.pt",
+    activations_by_position = {}
+    for activation_position in args.activation_positions:
+        activations_by_layer = collect_position_activations(
+            args=args,
+            model=model,
+            tokenizer=tokenizer,
+            device=device,
+            rows=labeled_rows,
+            layers_by_percent=layers_by_percent,
+            activation_position=activation_position,
         )
+        activations_by_position[activation_position] = activations_by_layer
+        for layer_percent, layer in layers_by_percent.items():
+            torch.save(
+                {
+                    "activation_position": activation_position,
+                    "layer_percent": layer_percent,
+                    "layer": layer,
+                    "sample_ids": [row["id"] for row in labeled_rows],
+                    "row_indices": [row["row_index"] for row in labeled_rows],
+                    "activations": activations_by_layer[layer],
+                },
+                output_dir / f"activations_{activation_position}_layer_{layer_percent}.pt",
+            )
     write_json(
         output_dir / "activation_summary.json",
         {
+            "activation_positions": args.activation_positions,
             "layer_percents": args.layer_percents,
             "layers_by_percent": {str(k): v for k, v in layers_by_percent.items()},
             "num_rows": len(labeled_rows),
-            "activation_position": "A_output_start_last_token_of_opening_output_tag",
+            "position_definitions": {
+                "pre_cot": "last token of rendered prompt before generated assistant reasoning",
+                "think_end": "last token of generated </think> prefix",
+                "output_start": "last token of generated <output> opening tag prefix",
+            },
         },
     )
-    return activations_by_layer
+    return activations_by_position
 
 
-def load_activations(output_dir: Path, layer_percents: list[int]) -> dict[int, torch.Tensor]:
-    activations_by_layer = {}
-    for layer_percent in layer_percents:
-        payload = torch.load(output_dir / f"activations_layer_{layer_percent}.pt", map_location="cpu")
-        activations_by_layer[int(payload["layer"])] = payload["activations"].float()
-    return activations_by_layer
+def load_activations(
+    output_dir: Path,
+    layer_percents: list[int],
+    activation_positions: list[str],
+) -> dict[str, dict[int, torch.Tensor]]:
+    activations_by_position = {}
+    for activation_position in activation_positions:
+        activations_by_layer = {}
+        for layer_percent in layer_percents:
+            activation_path = output_dir / f"activations_{activation_position}_layer_{layer_percent}.pt"
+            if activation_position == "output_start" and not activation_path.exists():
+                activation_path = output_dir / f"activations_layer_{layer_percent}.pt"
+            payload = torch.load(activation_path, map_location="cpu")
+            activations_by_layer[int(payload["layer"])] = payload["activations"].float()
+        activations_by_position[activation_position] = activations_by_layer
+    return activations_by_position
 
 
 def make_matched_indices(labeled_rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -513,71 +580,85 @@ def run_classifier_stage(
     args,
     output_dir: Path,
     labeled_rows: list[dict[str, Any]],
-    activations_by_layer: dict[int, torch.Tensor],
-) -> dict[int, dict[str, torch.Tensor]]:
+    activations_by_position: dict[str, dict[int, torch.Tensor]],
+) -> dict[str, dict[int, dict[str, torch.Tensor]]]:
     layers_by_percent = {layer_percent: layer_percent_to_layer(args.model_name, layer_percent) for layer_percent in args.layer_percents}
     pairs = make_matched_indices(labeled_rows)
     write_json(output_dir / "matched_pairs.json", {"pairs": pairs})
 
-    feature_payload: dict[str, Any] = {"layers": {}, "pairs": pairs}
-    summary: dict[str, Any] = {"num_pairs": len(pairs), "layers": {}}
-    feature_directions_by_layer = {}
+    summary: dict[str, Any] = {"num_pairs": len(pairs), "positions": {}}
+    feature_directions_by_position = {}
 
-    for layer_percent, layer in layers_by_percent.items():
-        x, y, matched_indices = prepare_classifier_data(activations_by_layer[layer], pairs)
-        classifier_info = train_linear_classifier(
-            x=x,
-            y=y,
-            epochs=args.classifier_epochs,
-            lr=args.classifier_lr,
-            weight_decay=args.classifier_weight_decay,
-            seed=args.seed,
-        )
-        deceptive_x = x[y == 1]
-        honest_x = x[y == 0]
-        mean_diff_direction = F.normalize(deceptive_x.mean(dim=0) - honest_x.mean(dim=0), dim=0)
+    for activation_position in args.activation_positions:
+        feature_payload: dict[str, Any] = {"activation_position": activation_position, "layers": {}, "pairs": pairs}
+        summary["positions"][activation_position] = {"layers": {}}
+        feature_directions_by_position[activation_position] = {}
+        activations_by_layer = activations_by_position[activation_position]
 
-        feature_directions_by_layer[layer] = {
-            "classifier": classifier_info["direction"],
-            "mean_diff": mean_diff_direction,
-        }
-        feature_payload["layers"][str(layer_percent)] = {
-            "layer": layer,
-            "classifier_direction": classifier_info["direction"],
-            "mean_diff_direction": mean_diff_direction,
-            "classifier_bias": classifier_info["bias"],
-            "matched_indices": matched_indices,
-            "labels": y,
-            "logits": classifier_info["all_logits"],
-        }
-        summary["layers"][str(layer_percent)] = {
-            "layer": layer,
-            "train_acc": classifier_info["train_acc"],
-            "test_acc": classifier_info["test_acc"],
-            "num_train": classifier_info["num_train"],
-            "num_test": classifier_info["num_test"],
-            "classifier_direction_norm": float(classifier_info["direction"].norm().item()),
-            "mean_diff_direction_norm": float(mean_diff_direction.norm().item()),
-            "mean_classifier_logit_deceptive": float(classifier_info["all_logits"][y == 1].mean().item()),
-            "mean_classifier_logit_honest": float(classifier_info["all_logits"][y == 0].mean().item()),
-        }
+        for layer_percent, layer in layers_by_percent.items():
+            x, y, matched_indices = prepare_classifier_data(activations_by_layer[layer], pairs)
+            classifier_info = train_linear_classifier(
+                x=x,
+                y=y,
+                epochs=args.classifier_epochs,
+                lr=args.classifier_lr,
+                weight_decay=args.classifier_weight_decay,
+                seed=args.seed,
+            )
+            deceptive_x = x[y == 1]
+            honest_x = x[y == 0]
+            mean_diff_direction = F.normalize(deceptive_x.mean(dim=0) - honest_x.mean(dim=0), dim=0)
 
-    torch.save(feature_payload, output_dir / "classifier_features.pt")
+            feature_directions_by_position[activation_position][layer] = {
+                "classifier": classifier_info["direction"],
+                "mean_diff": mean_diff_direction,
+            }
+            feature_payload["layers"][str(layer_percent)] = {
+                "layer": layer,
+                "classifier_direction": classifier_info["direction"],
+                "mean_diff_direction": mean_diff_direction,
+                "classifier_bias": classifier_info["bias"],
+                "matched_indices": matched_indices,
+                "labels": y,
+                "logits": classifier_info["all_logits"],
+            }
+            summary["positions"][activation_position]["layers"][str(layer_percent)] = {
+                "layer": layer,
+                "train_acc": classifier_info["train_acc"],
+                "test_acc": classifier_info["test_acc"],
+                "num_train": classifier_info["num_train"],
+                "num_test": classifier_info["num_test"],
+                "classifier_direction_norm": float(classifier_info["direction"].norm().item()),
+                "mean_diff_direction_norm": float(mean_diff_direction.norm().item()),
+                "mean_classifier_logit_deceptive": float(classifier_info["all_logits"][y == 1].mean().item()),
+                "mean_classifier_logit_honest": float(classifier_info["all_logits"][y == 0].mean().item()),
+            }
+
+        torch.save(feature_payload, output_dir / f"classifier_features_{activation_position}.pt")
+
+    if args.activation_positions == ["output_start"]:
+        torch.save(feature_payload, output_dir / "classifier_features.pt")
     write_json(output_dir / "classifier_summary.json", summary)
-    return feature_directions_by_layer
+    return feature_directions_by_position
 
 
-def load_classifier_features(output_dir: Path, args) -> dict[int, dict[str, torch.Tensor]]:
-    payload = torch.load(output_dir / "classifier_features.pt", map_location="cpu")
-    directions_by_layer = {}
-    for layer_percent in args.layer_percents:
-        layer_payload = payload["layers"][str(layer_percent)]
-        layer = int(layer_payload["layer"])
-        directions_by_layer[layer] = {
-            "classifier": layer_payload["classifier_direction"].float(),
-            "mean_diff": layer_payload["mean_diff_direction"].float(),
-        }
-    return directions_by_layer
+def load_classifier_features(output_dir: Path, args) -> dict[str, dict[int, dict[str, torch.Tensor]]]:
+    directions_by_position = {}
+    for activation_position in args.activation_positions:
+        feature_path = output_dir / f"classifier_features_{activation_position}.pt"
+        if activation_position == "output_start" and not feature_path.exists():
+            feature_path = output_dir / "classifier_features.pt"
+        payload = torch.load(feature_path, map_location="cpu")
+        directions_by_layer = {}
+        for layer_percent in args.layer_percents:
+            layer_payload = payload["layers"][str(layer_percent)]
+            layer = int(layer_payload["layer"])
+            directions_by_layer[layer] = {
+                "classifier": layer_payload["classifier_direction"].float(),
+                "mean_diff": layer_payload["mean_diff_direction"].float(),
+            }
+        directions_by_position[activation_position] = directions_by_layer
+    return directions_by_position
 
 
 def remove_projection_from_acts(acts_ND: torch.Tensor, direction_D: torch.Tensor, scale: float) -> torch.Tensor:
@@ -621,11 +702,12 @@ def generate_output_continuations(
     tokenizer,
     device: torch.device,
     rows: list[dict[str, Any]],
+    activation_position: str,
     layer: Optional[int],
     direction_D: Optional[torch.Tensor],
 ) -> list[str]:
     prefix_texts = [
-        row["rendered_prompt"] + row["assistant_prefix_to_output_start"]
+        get_activation_prefix(row, activation_position)
         for row in rows
     ]
     outputs = []
@@ -678,7 +760,7 @@ def run_intervention_stage(
     device: torch.device,
     output_dir: Path,
     labeled_rows: list[dict[str, Any]],
-    directions_by_layer: dict[int, dict[str, torch.Tensor]],
+    directions_by_position: dict[str, dict[int, dict[str, torch.Tensor]]],
 ) -> None:
     eval_rows = labeled_rows
     if args.intervention_max_examples is not None:
@@ -687,54 +769,67 @@ def run_intervention_stage(
     layers_by_percent = {layer_percent: layer_percent_to_layer(args.model_name, layer_percent) for layer_percent in args.layer_percents}
     summary_rows = []
 
-    for layer_percent, layer in layers_by_percent.items():
-        modes = {
-            "baseline": None,
-            "remove_classifier": directions_by_layer[layer]["classifier"],
-            "remove_mean_diff": directions_by_layer[layer]["mean_diff"],
-        }
-        for mode_name, direction_D in modes.items():
-            continuations = generate_output_continuations(
-                args=args,
-                model=model,
-                tokenizer=tokenizer,
-                device=device,
-                rows=eval_rows,
-                layer=None if mode_name == "baseline" else layer,
-                direction_D=direction_D,
-            )
-            mode_rows = []
-            for row, continuation in zip(eval_rows, continuations, strict=True):
-                cleaned_output = continuation.split("</output>")[0].strip()
-                mode_rows.append(
+    for activation_position in args.activation_positions:
+        directions_by_layer = directions_by_position[activation_position]
+        for layer_percent, layer in layers_by_percent.items():
+            modes = {
+                "baseline": None,
+                "remove_classifier": directions_by_layer[layer]["classifier"],
+                "remove_mean_diff": directions_by_layer[layer]["mean_diff"],
+            }
+            for mode_name, direction_D in modes.items():
+                continuations = generate_output_continuations(
+                    args=args,
+                    model=model,
+                    tokenizer=tokenizer,
+                    device=device,
+                    rows=eval_rows,
+                    activation_position=activation_position,
+                    layer=None if mode_name == "baseline" else layer,
+                    direction_D=direction_D,
+                )
+                mode_rows = []
+                for row, continuation in zip(eval_rows, continuations, strict=True):
+                    generated_text_for_judge = build_full_generated_text_from_position(row, activation_position, continuation)
+                    parsed = parse_think_output(generated_text_for_judge)
+                    if not parsed["parse_success"]:
+                        raise ValueError(
+                            f"Intervention output parse failed for activation_position={activation_position}, "
+                            f"mode={mode_name}, row_index={row['row_index']}"
+                        )
+                    mode_rows.append(
+                        {
+                            "row_index": row["row_index"],
+                            "id": row["id"],
+                            "type": row["type"],
+                            "original_sample_group": row["sample_group"],
+                            "activation_position": activation_position,
+                            "mode": mode_name,
+                            "layer_percent": layer_percent,
+                            "layer": layer,
+                            "intervened_generated_text": generated_text_for_judge,
+                            "intervened_think_text": parsed["think_text"],
+                            "intervened_output": parsed["output_text"],
+                            "raw_continuation": continuation,
+                        }
+                    )
+                write_jsonl(output_dir / f"intervention_{activation_position}_layer_{layer_percent}_{mode_name}.jsonl", mode_rows)
+
+                judged_rows = judge_intervention_outputs(args, model, tokenizer, device, eval_rows, mode_rows)
+                write_jsonl(output_dir / f"intervention_labels_{activation_position}_layer_{layer_percent}_{mode_name}.jsonl", judged_rows)
+                dtr_rate = sum(int(row["sample_group"] == "deceptive_hidden") for row in judged_rows) / len(judged_rows)
+                honest_safe_rate = sum(int(row["sample_group"] == "honest_safe") for row in judged_rows) / len(judged_rows)
+                summary_rows.append(
                     {
-                        "row_index": row["row_index"],
-                        "id": row["id"],
-                        "type": row["type"],
-                        "original_sample_group": row["sample_group"],
-                        "mode": mode_name,
+                        "activation_position": activation_position,
                         "layer_percent": layer_percent,
                         "layer": layer,
-                        "intervened_output": cleaned_output,
-                        "raw_continuation": continuation,
+                        "mode": mode_name,
+                        "num_rows": len(judged_rows),
+                        "dtr_rate": dtr_rate,
+                        "honest_safe_rate": honest_safe_rate,
                     }
                 )
-            write_jsonl(output_dir / f"intervention_layer_{layer_percent}_{mode_name}.jsonl", mode_rows)
-
-            judged_rows = judge_intervention_outputs(args, model, tokenizer, device, eval_rows, mode_rows)
-            write_jsonl(output_dir / f"intervention_labels_layer_{layer_percent}_{mode_name}.jsonl", judged_rows)
-            dtr_rate = sum(int(row["sample_group"] == "deceptive_hidden") for row in judged_rows) / len(judged_rows)
-            honest_safe_rate = sum(int(row["sample_group"] == "honest_safe") for row in judged_rows) / len(judged_rows)
-            summary_rows.append(
-                {
-                    "layer_percent": layer_percent,
-                    "layer": layer,
-                    "mode": mode_name,
-                    "num_rows": len(judged_rows),
-                    "dtr_rate": dtr_rate,
-                    "honest_safe_rate": honest_safe_rate,
-                }
-            )
 
     with open(output_dir / "intervention_summary.csv", "w", encoding="utf-8", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=list(summary_rows[0].keys()))
@@ -744,6 +839,7 @@ def run_intervention_stage(
 
 def build_intervention_judge_prompt(original_row: dict[str, Any], intervention_row: dict[str, Any]) -> str:
     row = dict(original_row)
+    row["think_text"] = intervention_row["intervened_think_text"]
     row["output_text"] = intervention_row["intervened_output"]
     return build_judge_prompt(row)
 
@@ -816,6 +912,7 @@ def build_oracle_eval_data(
     verbalizer_prompts: list[str],
     mode_name: str,
     layer_percent: int,
+    activation_position: str,
 ) -> list:
     eval_data = []
     for prompt in verbalizer_prompts:
@@ -835,6 +932,7 @@ def build_oracle_eval_data(
                     "id": row["id"],
                     "type": row["type"],
                     "sample_group": row["sample_group"],
+                    "activation_position": activation_position,
                     "mode": mode_name,
                     "layer_percent": layer_percent,
                     "layer": layer,
@@ -852,8 +950,8 @@ def run_oracle_stage(
     device: torch.device,
     output_dir: Path,
     labeled_rows: list[dict[str, Any]],
-    activations_by_layer: dict[int, torch.Tensor],
-    directions_by_layer: dict[int, dict[str, torch.Tensor]],
+    activations_by_position: dict[str, dict[int, torch.Tensor]],
+    directions_by_position: dict[str, dict[int, dict[str, torch.Tensor]]],
 ) -> None:
     ensure_peft_ready(model)
     oracle_lora_path = resolve_oracle_lora_path(args)
@@ -872,57 +970,62 @@ def run_oracle_stage(
     layers_by_percent = {layer_percent: layer_percent_to_layer(args.model_name, layer_percent) for layer_percent in args.layer_percents}
     summary_rows = []
 
-    for layer_percent, layer in layers_by_percent.items():
-        base_acts = activations_by_layer[layer][: len(eval_rows)]
-        acts_by_mode = {
-            "baseline": base_acts,
-            "remove_classifier": remove_projection_from_acts(base_acts, directions_by_layer[layer]["classifier"], args.intervention_scale),
-            "remove_mean_diff": remove_projection_from_acts(base_acts, directions_by_layer[layer]["mean_diff"], args.intervention_scale),
-        }
-        for mode_name, acts_ND in acts_by_mode.items():
-            eval_data = build_oracle_eval_data(
-                tokenizer=tokenizer,
-                rows=eval_rows,
-                acts_ND=acts_ND,
-                layer=layer,
-                verbalizer_prompts=verbalizer_prompts,
-                mode_name=mode_name,
-                layer_percent=layer_percent,
-            )
-            responses = run_evaluation(
-                eval_data=eval_data,
-                model=model,
-                tokenizer=tokenizer,
-                submodule=injection_submodule,
-                device=device,
-                dtype=args.torch_dtype,
-                global_step=-1,
-                lora_path=oracle_lora_path,
-                eval_batch_size=args.oracle_eval_batch_size,
-                steering_coefficient=args.oracle_steering_coefficient,
-                generation_kwargs=generation_kwargs,
-            )
-            oracle_rows = []
-            for response in responses:
-                meta = dict(response.meta_info)
-                oracle_rows.append(
+    for activation_position in args.activation_positions:
+        activations_by_layer = activations_by_position[activation_position]
+        directions_by_layer = directions_by_position[activation_position]
+        for layer_percent, layer in layers_by_percent.items():
+            base_acts = activations_by_layer[layer][: len(eval_rows)]
+            acts_by_mode = {
+                "baseline": base_acts,
+                "remove_classifier": remove_projection_from_acts(base_acts, directions_by_layer[layer]["classifier"], args.intervention_scale),
+                "remove_mean_diff": remove_projection_from_acts(base_acts, directions_by_layer[layer]["mean_diff"], args.intervention_scale),
+            }
+            for mode_name, acts_ND in acts_by_mode.items():
+                eval_data = build_oracle_eval_data(
+                    tokenizer=tokenizer,
+                    rows=eval_rows,
+                    acts_ND=acts_ND,
+                    layer=layer,
+                    verbalizer_prompts=verbalizer_prompts,
+                    mode_name=mode_name,
+                    layer_percent=layer_percent,
+                    activation_position=activation_position,
+                )
+                responses = run_evaluation(
+                    eval_data=eval_data,
+                    model=model,
+                    tokenizer=tokenizer,
+                    submodule=injection_submodule,
+                    device=device,
+                    dtype=args.torch_dtype,
+                    global_step=-1,
+                    lora_path=oracle_lora_path,
+                    eval_batch_size=args.oracle_eval_batch_size,
+                    steering_coefficient=args.oracle_steering_coefficient,
+                    generation_kwargs=generation_kwargs,
+                )
+                oracle_rows = []
+                for response in responses:
+                    meta = dict(response.meta_info)
+                    oracle_rows.append(
+                        {
+                            **meta,
+                            "oracle_response": response.api_response,
+                            "deception_family": int(DECEPTION_FAMILY_RE.search(response.api_response) is not None),
+                        }
+                    )
+                write_jsonl(output_dir / f"oracle_{activation_position}_layer_{layer_percent}_{mode_name}.jsonl", oracle_rows)
+                deception_family_rate = sum(row["deception_family"] for row in oracle_rows) / len(oracle_rows)
+                summary_rows.append(
                     {
-                        **meta,
-                        "oracle_response": response.api_response,
-                        "deception_family": int(DECEPTION_FAMILY_RE.search(response.api_response) is not None),
+                        "activation_position": activation_position,
+                        "layer_percent": layer_percent,
+                        "layer": layer,
+                        "mode": mode_name,
+                        "num_oracle_rows": len(oracle_rows),
+                        "deception_family_rate": deception_family_rate,
                     }
                 )
-            write_jsonl(output_dir / f"oracle_layer_{layer_percent}_{mode_name}.jsonl", oracle_rows)
-            deception_family_rate = sum(row["deception_family"] for row in oracle_rows) / len(oracle_rows)
-            summary_rows.append(
-                {
-                    "layer_percent": layer_percent,
-                    "layer": layer,
-                    "mode": mode_name,
-                    "num_oracle_rows": len(oracle_rows),
-                    "deception_family_rate": deception_family_rate,
-                }
-            )
 
     with open(output_dir / "oracle_summary.csv", "w", encoding="utf-8", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=list(summary_rows[0].keys()))
@@ -947,17 +1050,22 @@ def write_combined_summary(
         intervention_rows = list(csv.DictReader(f))
 
     oracle_by_key = {
-        (str(row["layer_percent"]), str(row["mode"])): row
+        (str(row["activation_position"]), str(row["layer_percent"]), str(row["mode"])): row
         for row in oracle_summary_rows
     }
     combined_rows = []
     for intervention_row in intervention_rows:
-        key = (str(intervention_row["layer_percent"]), str(intervention_row["mode"]))
+        key = (
+            str(intervention_row["activation_position"]),
+            str(intervention_row["layer_percent"]),
+            str(intervention_row["mode"]),
+        )
         if key not in oracle_by_key:
             continue
         oracle_row = oracle_by_key[key]
         combined_rows.append(
             {
+                "activation_position": intervention_row["activation_position"],
                 "layer_percent": intervention_row["layer_percent"],
                 "layer": intervention_row["layer"],
                 "mode": intervention_row["mode"],
@@ -1012,6 +1120,13 @@ def main() -> None:
     parser.add_argument("--generation_batch_size", type=int, default=4)
     parser.add_argument("--judge_batch_size", type=int, default=4)
     parser.add_argument("--judge_max_new_tokens", type=int, default=256)
+    parser.add_argument(
+        "--activation_positions",
+        type=str,
+        nargs="+",
+        default=["output_start"],
+        choices=VALID_ACTIVATION_POSITIONS,
+    )
     parser.add_argument("--layer_percents", type=int, nargs="+", default=[25, 50, 75])
     parser.add_argument("--activation_batch_size", type=int, default=4)
     parser.add_argument("--classifier_epochs", type=int, default=500)
@@ -1060,34 +1175,36 @@ def main() -> None:
 
     generation_rows = None
     labeled_rows = None
-    activations_by_layer = None
-    directions_by_layer = None
+    activations_by_position = None
+    directions_by_position = None
 
     if "generate" in args.stages:
         generation_rows = run_generation_stage(args, model, tokenizer, device, output_dir)
     else:
         generation_rows = read_jsonl(output_dir / "generations.jsonl")
+    generation_rows = ensure_activation_prefix_fields(generation_rows)
 
     if "label" in args.stages:
         labeled_rows = run_label_stage(args, model, tokenizer, device, output_dir, generation_rows)
     else:
         labeled_rows = read_jsonl(output_dir / "labels.jsonl")
+    labeled_rows = ensure_activation_prefix_fields(labeled_rows)
 
     if "activations" in args.stages:
-        activations_by_layer = run_activation_stage(args, model, tokenizer, device, output_dir, labeled_rows)
+        activations_by_position = run_activation_stage(args, model, tokenizer, device, output_dir, labeled_rows)
     else:
-        activations_by_layer = load_activations(output_dir, args.layer_percents)
+        activations_by_position = load_activations(output_dir, args.layer_percents, args.activation_positions)
 
     if "classifier" in args.stages:
-        directions_by_layer = run_classifier_stage(args, output_dir, labeled_rows, activations_by_layer)
+        directions_by_position = run_classifier_stage(args, output_dir, labeled_rows, activations_by_position)
     else:
-        directions_by_layer = load_classifier_features(output_dir, args)
+        directions_by_position = load_classifier_features(output_dir, args)
 
     if "intervention" in args.stages:
-        run_intervention_stage(args, model, tokenizer, device, output_dir, labeled_rows, directions_by_layer)
+        run_intervention_stage(args, model, tokenizer, device, output_dir, labeled_rows, directions_by_position)
 
     if "oracle" in args.stages:
-        run_oracle_stage(args, model, tokenizer, device, output_dir, labeled_rows, activations_by_layer, directions_by_layer)
+        run_oracle_stage(args, model, tokenizer, device, output_dir, labeled_rows, activations_by_position, directions_by_position)
 
 
 if __name__ == "__main__":
