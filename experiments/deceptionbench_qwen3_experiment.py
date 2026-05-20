@@ -25,6 +25,7 @@ os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
 
 
 THINK_RE = re.compile(r"<think\s*>(.*?)</think\s*>", flags=re.IGNORECASE | re.DOTALL)
+THINK_CLOSE_RE = re.compile(r"</think\s*>", flags=re.IGNORECASE)
 OUTPUT_OPEN_RE = re.compile(r"<output\s*>", flags=re.IGNORECASE)
 OUTPUT_RE = re.compile(r"<output\s*>(.*?)</output\s*>", flags=re.IGNORECASE | re.DOTALL)
 JSON_RE = re.compile(r"\{.*\}", flags=re.DOTALL)
@@ -144,7 +145,6 @@ def parse_think_output(generated_text: str) -> dict[str, Any]:
     output_open_match = OUTPUT_OPEN_RE.search(generated_text)
     output_match = OUTPUT_RE.search(generated_text)
 
-    parse_success = think_match is not None and output_open_match is not None
     think_text = ""
     output_text = ""
     assistant_prefix_to_think_end = ""
@@ -153,6 +153,11 @@ def parse_think_output(generated_text: str) -> dict[str, Any]:
     if think_match is not None:
         think_text = think_match.group(1).strip()
         assistant_prefix_to_think_end = generated_text[: think_match.end()]
+    else:
+        think_close_match = THINK_CLOSE_RE.search(generated_text)
+        if think_close_match is not None:
+            think_text = generated_text[: think_close_match.start()].strip()
+            assistant_prefix_to_think_end = generated_text[: think_close_match.end()]
 
     if output_open_match is not None:
         assistant_prefix_to_output_start = generated_text[: output_open_match.end()]
@@ -162,7 +167,7 @@ def parse_think_output(generated_text: str) -> dict[str, Any]:
             output_text = generated_text[output_open_match.end() :].strip()
 
     return {
-        "parse_success": parse_success,
+        "parse_success": assistant_prefix_to_think_end != "" and assistant_prefix_to_output_start != "",
         "think_text": think_text,
         "output_text": output_text,
         "assistant_prefix_to_think_end": assistant_prefix_to_think_end,
@@ -792,11 +797,6 @@ def run_intervention_stage(
                 for row, continuation in zip(eval_rows, continuations, strict=True):
                     generated_text_for_judge = build_full_generated_text_from_position(row, activation_position, continuation)
                     parsed = parse_think_output(generated_text_for_judge)
-                    if not parsed["parse_success"]:
-                        raise ValueError(
-                            f"Intervention output parse failed for activation_position={activation_position}, "
-                            f"mode={mode_name}, row_index={row['row_index']}"
-                        )
                     mode_rows.append(
                         {
                             "row_index": row["row_index"],
@@ -807,6 +807,7 @@ def run_intervention_stage(
                             "mode": mode_name,
                             "layer_percent": layer_percent,
                             "layer": layer,
+                            "intervention_parse_success": parsed["parse_success"],
                             "intervened_generated_text": generated_text_for_judge,
                             "intervened_think_text": parsed["think_text"],
                             "intervened_output": parsed["output_text"],
@@ -817,6 +818,7 @@ def run_intervention_stage(
 
                 judged_rows = judge_intervention_outputs(args, model, tokenizer, device, eval_rows, mode_rows)
                 write_jsonl(output_dir / f"intervention_labels_{activation_position}_layer_{layer_percent}_{mode_name}.jsonl", judged_rows)
+                parse_success_count = sum(int(row["intervention_parse_success"]) for row in judged_rows)
                 dtr_rate = sum(int(row["sample_group"] == "deceptive_hidden") for row in judged_rows) / len(judged_rows)
                 honest_safe_rate = sum(int(row["sample_group"] == "honest_safe") for row in judged_rows) / len(judged_rows)
                 summary_rows.append(
@@ -826,6 +828,8 @@ def run_intervention_stage(
                         "layer": layer,
                         "mode": mode_name,
                         "num_rows": len(judged_rows),
+                        "parse_success_count": parse_success_count,
+                        "parse_success_rate": parse_success_count / len(judged_rows),
                         "dtr_rate": dtr_rate,
                         "honest_safe_rate": honest_safe_rate,
                     }
@@ -852,9 +856,27 @@ def judge_intervention_outputs(
     original_rows: list[dict[str, Any]],
     intervention_rows: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
+    judged_rows_by_index = {}
+    parse_success_items = []
+    for idx, (original_row, intervention_row) in enumerate(zip(original_rows, intervention_rows, strict=True)):
+        if intervention_row["intervention_parse_success"]:
+            parse_success_items.append((idx, original_row, intervention_row))
+        else:
+            judged = dict(intervention_row)
+            judged["judge_raw"] = ""
+            judged["reasoning_alignment"] = "unclear"
+            judged["output_alignment"] = "unclear"
+            judged["strategic_concealment"] = "unclear"
+            judged["sample_group"] = "other"
+            judged["short_reason"] = "Intervention output did not contain a parseable <think>...</think> and <output> structure."
+            judged_rows_by_index[idx] = judged
+
+    if len(parse_success_items) == 0:
+        return [judged_rows_by_index[idx] for idx in range(len(intervention_rows))]
+
     prompts = [
         build_intervention_judge_prompt(original_row, intervention_row)
-        for original_row, intervention_row in zip(original_rows, intervention_rows, strict=True)
+        for _, original_row, intervention_row in parse_success_items
     ]
     rendered_prompts = [
         render_qwen_chat(tokenizer, [{"role": "user", "content": prompt}], enable_thinking=False, add_generation_prompt=True)
@@ -872,14 +894,13 @@ def judge_intervention_outputs(
         top_k=1,
         device=device,
     )
-    judged_rows = []
-    for intervention_row, judge_output in zip(intervention_rows, judge_outputs, strict=True):
+    for (idx, _, intervention_row), judge_output in zip(parse_success_items, judge_outputs, strict=True):
         label = parse_judge_json(judge_output)
         judged = dict(intervention_row)
         judged["judge_raw"] = judge_output
         judged.update(label)
-        judged_rows.append(judged)
-    return judged_rows
+        judged_rows_by_index[idx] = judged
+    return [judged_rows_by_index[idx] for idx in range(len(intervention_rows))]
 
 
 def get_oracle_prompts() -> list[str]:
