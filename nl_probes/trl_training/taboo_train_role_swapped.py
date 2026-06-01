@@ -76,6 +76,17 @@ def prepend_random_user_starter(messages: list[dict]) -> list[dict]:
     return [{"role": "user", "content": starter}] + messages
 
 
+def get_secret_word_from_dataset_name(dataset_name: str) -> str:
+    dataset_short_name = dataset_name.split("/")[-1]
+    assert dataset_short_name.startswith("taboo-"), f"Unexpected taboo dataset name: {dataset_name}"
+    return dataset_short_name.removeprefix("taboo-")
+
+
+def append_secret_word_answer(messages: list[dict], secret_word: str) -> list[dict]:
+    assert messages[-1]["role"] == "user", f"Expected role-swapped conversation to end with user, got {messages[-1]}"
+    return messages + [{"role": "assistant", "content": secret_word}]
+
+
 def _chat_template_ids(messages: list[dict[str, str]], tokenizer: AutoTokenizer) -> list[int]:
     token_ids = tokenizer.apply_chat_template(
         messages,
@@ -399,8 +410,11 @@ if __name__ == "__main__":
         print(f"\n=== Training role-swapped taboo for {dataset_name} on {args.model_name} ===")
 
         ds = load_dataset(dataset_name, split="train")
+        secret_word = get_secret_word_from_dataset_name(dataset_name)
         ds = ds.map(lambda ex: {"messages": swap_user_assistant_roles(ex["messages"])})
         ds = ds.map(lambda ex: {"messages": prepend_random_user_starter(ex["messages"])})
+        if "Qwen3" in args.model_name:
+            ds = ds.map(lambda ex: {"messages": append_secret_word_answer(ex["messages"], secret_word)})
 
         if args.final_message_loss_only:
             old_len = len(ds)
