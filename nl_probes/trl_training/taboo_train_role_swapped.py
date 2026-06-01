@@ -430,9 +430,9 @@ if __name__ == "__main__":
         lora_name = lora_name.replace(" ", "_").replace(".", "_").replace("/", "_")
         save_lora_path = Path(args.model_lora_dir) / lora_name
 
-        if save_lora_path.exists():
-            print(f"{save_lora_path} already exists, skipping")
-            continue
+        # if save_lora_path.exists():
+        #     print(f"{save_lora_path} already exists, skipping")
+        #     continue
 
         sft_config = CustomSFTConfig(
             model_name=args.model_name,
