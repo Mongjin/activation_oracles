@@ -91,7 +91,7 @@ def _chat_template_ids(messages: list[dict[str, str]], tokenizer: AutoTokenizer)
     return list(token_ids)
 
 
-def manual_qwen3_assistant_mask(messages: list[dict[str, str]], tokenizer: AutoTokenizer, final_message_loss_only: bool = False):
+def generic_assistant_mask(messages: list[dict[str, str]], tokenizer: AutoTokenizer, final_message_loss_only: bool = False):
     input_ids_list = _chat_template_ids(messages, tokenizer)
     assistant_mask = torch.zeros(len(input_ids_list), dtype=torch.long)
 
@@ -114,6 +114,94 @@ def manual_qwen3_assistant_mask(messages: list[dict[str, str]], tokenizer: AutoT
         "input_ids": torch.tensor(input_ids_list, dtype=torch.long),
         "assistant_masks": assistant_mask,
     }
+
+
+def qwen3_assistant_mask(
+    messages: list[dict[str, str]], tokenizer: AutoTokenizer, final_message_loss_only: bool = False
+) -> dict[str, torch.Tensor]:
+    input_ids = tokenizer.apply_chat_template(
+        messages,
+        tokenize=True,
+        return_tensors="pt",
+        add_generation_prompt=False,
+        return_dict=False,
+        enable_thinking=False,
+    )
+
+    tmp = tokenizer.encode("<|im_start|>assistant\n")
+    assert len(tmp) == 3, f"Expected 3 tokens, got {len(tmp)}"
+    begin_turn_idx = tmp[0]
+    asst_idx = tmp[1]
+    newline_idx = tmp[2]
+
+    tmp_think = tokenizer.encode("<think>\n</think>")
+    assert len(tmp_think) == 3, f"Expected 3 tokens, got {len(tmp_think)}"
+    begin_think_idx = tmp_think[0]
+    end_think_idx = tmp_think[2]
+
+    eos_id = tokenizer.eos_token_id
+    assistant_mask = torch.zeros_like(input_ids)
+
+    num_messages = len(messages)
+    cur_eos_idx = 0
+    cur_message_idx = 0
+
+    for batch_idx in range(input_ids.shape[0]):
+        sequence = input_ids[batch_idx]
+        in_assistant_turn = False
+        train_on_this_message = False
+
+        i = 0
+        while i < len(sequence):
+            if i + 2 < len(sequence):
+                if sequence[i] == begin_turn_idx and sequence[i + 1] == asst_idx and sequence[i + 2] == newline_idx:
+                    i += 3
+                    cur_message_idx += 1
+                    in_assistant_turn = True
+
+                    if not final_message_loss_only:
+                        train_on_this_message = True
+
+                    if cur_message_idx == len(messages) - 1:
+                        assert sequence[i] == begin_think_idx and sequence[i + 2] == end_think_idx
+                        i += 3
+                        train_on_this_message = True
+                    continue
+
+            if sequence[i] == eos_id:
+                if in_assistant_turn:
+                    cur_message_idx += 1
+                    if train_on_this_message:
+                        assistant_mask[batch_idx, i] = 1
+
+                in_assistant_turn = False
+                i += 1
+                cur_eos_idx += 1
+                continue
+
+            if in_assistant_turn and train_on_this_message:
+                assistant_mask[batch_idx, i] = 1
+            else:
+                assistant_mask[batch_idx, i] = 0
+
+            i += 1
+
+    assert cur_eos_idx == num_messages, f"Expected {num_messages} messages, got {cur_eos_idx}"
+    assert cur_message_idx == num_messages, f"Expected {num_messages} messages, got {cur_message_idx}"
+    assert len(input_ids) == len(assistant_mask)
+
+    return {
+        "input_ids": input_ids.squeeze(0),
+        "assistant_masks": assistant_mask.squeeze(0),
+    }
+
+
+def manual_qwen3_assistant_mask(
+    messages: list[dict[str, str]], tokenizer: AutoTokenizer, final_message_loss_only: bool = False
+) -> dict[str, torch.Tensor]:
+    if "Qwen3" in tokenizer.name_or_path:
+        return qwen3_assistant_mask(messages, tokenizer, final_message_loss_only)
+    return generic_assistant_mask(messages, tokenizer, final_message_loss_only)
 
 
 def prepare_sft_dataset(dataset: Dataset, tokenizer: AutoTokenizer, final_message_loss_only: bool) -> Dataset:
